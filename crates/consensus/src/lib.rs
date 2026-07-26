@@ -31,5 +31,17 @@ pub mod courier;
 pub mod kzg;
 /// MetaLex organization management.
 pub mod metalex;
+/// Sync committee and BLS signature aggregation.
+pub mod sync_committee;
+/// Velocity telemetry and circuit breaker engine.
+pub mod velocity;
+/// SIL-3 Actuator Oracles & Heartbeat precompile 0xfe.
+pub mod actuator;
+/// Cross-manifold Actor system and Saga rollback engine.
+pub mod actor;
+/// Based meshing and succinct zkEVM proof broadcasting.
+pub mod based_mesh;
+/// RPC-to-IPFS archival pinning engine and daemon.
+pub mod archival;
 
 pub use pool::{FCFSOrdering, SovereignPoolBuilder};

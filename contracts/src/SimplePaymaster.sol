@@ -29,20 +29,18 @@ contract SimplePaymaster {
     }
 
     function validatePaymasterUserOp(
-        UserOperation calldata userOp,
-        bytes32 userOpHash,
-        uint256 maxCost
+        UserOperation calldata /*userOp*/,
+        bytes32 /*userOpHash*/,
+        uint256 /*maxCost*/
     ) external view returns (bytes memory context, uint256 validationData) {
-        userOp; userOpHash; maxCost; // silence unused warning
         // Return 0 to indicate signature / validation is valid
         return ("", 0);
     }
 
     function postOp(
-        PostOpMode mode,
-        bytes calldata context,
-        uint256 actualGasCost
+        PostOpMode /*mode*/,
+        bytes calldata /*context*/,
+        uint256 /*actualGasCost*/
     ) external view {
-        mode; context; actualGasCost; // silence unused warning
     }
 }

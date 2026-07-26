@@ -109,8 +109,19 @@ impl ValidatorRegistry {
         proof: [u8; 48],
         y: [u8; 32],
     ) -> Result<(), &'static str> {
+        let caller_did = self.get_did_by_address(&caller).ok_or("Caller is not a registered validator")?;
+        let caller_type = self.validators.get(&caller_did).ok_or("Caller type not found")?;
+
         if self.get_did_by_address(&caller).as_deref() != Some(did.as_str()) {
-            return Err("Caller does not own this DID");
+            // Posting on behalf of another node. Caller must be a TEE.
+            if *caller_type != ValidatorType::HardwareTEE {
+                return Err("Only TEE validators can submit commitments on behalf of other nodes");
+            }
+        } else {
+            // Posting for themselves. Must be a TEE.
+            if *caller_type != ValidatorType::HardwareTEE {
+                return Err("Only TEE validators can calculate and submit their own commitments");
+            }
         }
 
         if self.current_block % self.static_cfg.epoch.epoch_length > self.static_cfg.epoch.publishing_window {
@@ -524,6 +535,14 @@ impl ValidatorRegistry {
     #[cfg(test)]
     pub fn add_mock_validator(&mut self, did: String, addr: Address, peer_key: [u8; 32]) {
         self.validators.insert(did.clone(), ValidatorType::VanillaSocial);
+        self.peer_keys.insert(did.clone(), peer_key);
+        self.address_to_did.insert(addr, did);
+    }
+
+    /// Adds a mock TEE validator directly (used in testing).
+    #[cfg(test)]
+    pub fn add_mock_tee_validator(&mut self, did: String, addr: Address, peer_key: [u8; 32]) {
+        self.validators.insert(did.clone(), ValidatorType::HardwareTEE);
         self.peer_keys.insert(did.clone(), peer_key);
         self.address_to_did.insert(addr, did);
     }

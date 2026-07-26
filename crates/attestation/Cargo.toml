@@ -7,4 +7,4 @@ authors.workspace = true
 [dependencies]
 dcap-qvl = { workspace = true }
 scale = { workspace = true }
-
+alloy-primitives = { workspace = true }

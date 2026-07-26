@@ -8,6 +8,7 @@ pub mod delegation;
 pub mod merit;
 pub mod zkp_auth;
 pub mod namespace;
+pub mod did;
 
 /// The supported key types in DID Peer 4.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

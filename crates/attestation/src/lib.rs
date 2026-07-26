@@ -1,11 +1,12 @@
 //! TEE Attestation Module
-//! Provides abstraction for Hardware TEE and Mock attestations.
+//! Provides abstraction for Hardware TEE, DCAP, and Mock attestations.
 
 #![warn(missing_docs)]
 #![warn(clippy::all, clippy::pedantic)]
 
 pub mod sgx;
 pub mod mock;
+pub mod dcap;
 
 /// A generic trait for providing TEE attestations.
 pub trait AttestationProvider {

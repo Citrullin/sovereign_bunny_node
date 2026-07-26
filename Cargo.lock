@@ -10842,6 +10842,7 @@ dependencies = [
 name = "sovereign-attestation"
 version = "0.1.0"
 dependencies = [
+ "alloy-primitives",
  "dcap-qvl",
  "parity-scale-codec",
 ]
@@ -10874,6 +10875,7 @@ dependencies = [
  "revm-primitives",
  "revm-state",
  "serde",
+ "serde_json",
  "serial_test",
  "sovereign-attestation",
  "sovereign-identity",
@@ -10917,6 +10919,7 @@ dependencies = [
 name = "sovereign-node"
 version = "0.1.0"
 dependencies = [
+ "alloy-consensus",
  "alloy-primitives",
  "bs58",
  "clap",

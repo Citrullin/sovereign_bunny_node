@@ -206,19 +206,35 @@ fn main() {
         let dynamic_cfg_arc = std::sync::Arc::new(std::sync::RwLock::new(dynamic_cfg));
         let _ = sovereign_consensus::registry::init_registry(static_cfg, dynamic_cfg_arc);
 
-        let handle = builder
-            .with_types::<EthereumNode>()
-            .with_components(
-                EthereumNode::components()
-                    .pool(SovereignPoolBuilder::default())
-                    .consensus(NoopConsensusBuilder),
-            )
-            .with_add_ons(EthereumAddOns::default())
-            .install_exex("sovereign_exex", move |ctx| sovereign_exex(ctx, args.clone()))
-            .launch()
-            .await?;
+        let is_dev = std::env::args().any(|arg| arg == "--dev");
 
-        handle.wait_for_node_exit().await
+        if is_dev {
+            info!("Launching Sovereign Reth Node in DEV mode (Auto-Mining)");
+            let handle = builder
+                .with_types::<EthereumNode>()
+                .with_components(
+                    EthereumNode::components()
+                        .pool(SovereignPoolBuilder::default()),
+                )
+                .with_add_ons(EthereumAddOns::default())
+                .install_exex("sovereign_exex", move |ctx| sovereign_exex(ctx, args.clone()))
+                .launch_with_debug_capabilities()
+                .await?;
+            handle.wait_for_node_exit().await
+        } else {
+            let handle = builder
+                .with_types::<EthereumNode>()
+                .with_components(
+                    EthereumNode::components()
+                        .pool(SovereignPoolBuilder::default())
+                        .consensus(NoopConsensusBuilder),
+                )
+                .with_add_ons(EthereumAddOns::default())
+                .install_exex("sovereign_exex", move |ctx| sovereign_exex(ctx, args.clone()))
+                .launch()
+                .await?;
+            handle.wait_for_node_exit().await
+        }
     }) {
         eprintln!("Error: {err:?}");
         std::process::exit(1);

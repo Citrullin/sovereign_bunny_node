@@ -1,0 +1,24 @@
+# Cargo Configuration for Sovereign Reth
+# Restricts parallel compiler processes and memory footprint to prevent WSL OOM crashes.
+
+[build]
+# Restrict concurrent rustc compiler jobs to 1 (prevents multi-job memory explosions)
+jobs = 1
+# Use our custom wrapper script that enforces ulimit and delegates to sccache
+rustc-workspace-wrapper = "scripts/rustc-limit-wrapper.sh"
+# Disable incremental compilation globally to save gigabytes of disk storage
+incremental = false
+
+[env]
+CARGO_BUILD_JOBS = "1"
+
+[target.x86_64-unknown-linux-gnu]
+rustflags = [
+    "-C", "codegen-units=16",
+    "-C", "opt-level=0",
+    "-C", "debuginfo=0",
+    "-C", "llvm-args=-threads=1",
+    "-C", "link-arg=-fuse-ld=gold",
+    "-C", "link-arg=-Wl,--no-keep-memory",
+    "-C", "link-arg=-Wl,--strip-all",
+]

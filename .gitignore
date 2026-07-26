@@ -3,3 +3,10 @@
 /contracts/node_modules
 /contracts/out
 genesis.json
+/db1
+/db2
+/jwt.hex
+*.hex
+*.log
+rustc-ice-*
+

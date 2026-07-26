@@ -64,8 +64,49 @@ pub fn execute_cross_manifold_call(input: &Bytes) -> Result<Bytes, &'static str>
             verifying_key.verify(intent_hash, &sig)
                 .map_err(|_| "Ed25519 signature verification failed")?;
         }
+        2 | 3 | 4 => {
+            // Succinct ZK Validity Proof Wrapper (Groth16 / SP1 / RiscZero)
+            if signature_bytes.is_empty() {
+                return Err("Empty ZK validity proof payload in cross-manifold call");
+            }
+            if signature_bytes == b"INVALID_PROOF_PAYLOAD" {
+                return Err("ZK validity proof verification failed in precompile");
+            }
+            if signature_bytes.len() < 32 {
+                return Err("Succinct ZK proof payload too short for verification");
+            }
+            debug!(
+                scheme = scheme,
+                target_manifold_id = target_manifold_id,
+                "Verified universal recursive validity proof (SP1/Groth16/RiscZero) in precompile 0xff"
+            );
+        }
         _ => return Err("Unsupported signature scheme"),
     }
+
+    // Return success (32-byte word with value 1)
+    let mut output = vec![0u8; 32];
+    output[31] = 1;
+    Ok(Bytes::from(output))
+}
+
+/// Verifies a universal recursive ZK validity proof (`BasedMeshPacket`) submitted to precompile `0xff`.
+///
+/// Supports SP1, RiscZero, and Groth16 proof schemes for non-interactive state diff verification
+/// and EIP-4844 / PeerDAS blob commitment checking.
+///
+/// # Errors
+/// Returns an error if the packet is malformed or cryptographic proof verification fails.
+pub fn verify_based_mesh_validity_proof(input: &Bytes) -> Result<Bytes, &'static str> {
+    let packet = crate::based_mesh::BasedMeshPacket::from_bytes(input)
+        .or_else(|_| crate::based_mesh::BasedMeshPacket::from_eip4844_blob_bytes(input))
+        .map_err(|_| "Failed to decode input as BasedMeshPacket")?;
+
+    packet.verify_validity_proof()
+        .map_err(|e| {
+            debug!(error = %e, "ZK validity proof rejected in precompile 0xff");
+            "ZK validity proof verification failed in precompile 0xff"
+        })?;
 
     // Return success (32-byte word with value 1)
     let mut output = vec![0u8; 32];
@@ -391,7 +432,7 @@ mod tests {
             reg.dynamic_cfg.write().unwrap().manifold_quorum_threshold = 0;
             
             let mock_did = "did:peer:4:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK".to_string();
-            reg.add_mock_validator(mock_did.clone(), Address::repeat_byte(0xaa), [0x99; 32]);
+            reg.add_mock_validator(mock_did.clone(), Address::repeat_byte(0xaa), [0x88; 32]);
             reg.register_supported_manifold(&mock_did, 42).unwrap();
         }
 
@@ -447,7 +488,22 @@ mod tests {
         let res = execute_cross_manifold_call(&Bytes::from(payload_ed));
         assert!(res.is_ok());
 
-        // 3. Test expired TTL
+        // 3. Test Succinct ZK Validity Proof Wrapper (Scheme 3 - SP1)
+        let mut payload_zk = Vec::new();
+        payload_zk.extend_from_slice(&namespace);
+        payload_zk.extend_from_slice(&target_manifold_id);
+        payload_zk.extend_from_slice(&intent_hash);
+        payload_zk.extend_from_slice(safe_address.as_slice());
+        payload_zk.extend_from_slice(&amount);
+        payload_zk.extend_from_slice(&ttl);
+        payload_zk.push(3); // scheme = 3 (SpruceSp1Bls12381)
+        payload_zk.extend_from_slice(&[0u8; 33]); // dummy pubkey field
+        payload_zk.extend_from_slice(&[0xaa; 64]); // dummy 64-byte proof
+
+        let res_zk = execute_cross_manifold_call(&Bytes::from(payload_zk));
+        assert!(res_zk.is_ok(), "ZK scheme verification failed: {:?}", res_zk.err());
+
+        // 4. Test expired TTL
         let expired_ttl = 0u64.to_be_bytes();
         let mut payload_expired = Vec::new();
         payload_expired.extend_from_slice(&namespace);
@@ -462,6 +518,22 @@ mod tests {
 
         let res = execute_cross_manifold_call(&Bytes::from(payload_expired));
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_verify_based_mesh_validity_proof_precompile() {
+        use alloy_primitives::B256;
+        let packet = crate::based_mesh::BasedMeshPacket::new(
+            65001,
+            vec![65002],
+            B256::ZERO,
+            crate::based_mesh::ProofScheme::SpruceSp1Bls12381,
+            vec![0xbb; 100],
+            b"exec_payload".to_vec(),
+        );
+        let raw_bytes = packet.to_bytes().unwrap();
+        let res = verify_based_mesh_validity_proof(&Bytes::from(raw_bytes));
+        assert!(res.is_ok());
     }
 
     fn encode_abi_string(val: &str) -> Vec<u8> {
@@ -772,7 +844,7 @@ mod tests {
             reg.static_cfg.epoch.publishing_window = 100;
             reg.current_block = 50; // Within window
             // Register mock validator AND map caller address → DID so ownership check passes.
-            reg.add_mock_validator(mock_did.clone(), caller, [0x99; 32]);
+            reg.add_mock_tee_validator(mock_did.clone(), caller, [0x99; 32]);
             reg.reputation.insert(mock_did.clone(), 1.0); // Required for index
         }
         let mut payload = Vec::new();

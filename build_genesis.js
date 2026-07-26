@@ -38,7 +38,10 @@ const genesis = {
     "grayGlacierBlock": 0,
     "shanghaiTime": 0,
     "cancunTime": 0,
-    "pragueTime": 0
+    "pragueTime": 0,
+    "parisBlock": 0,
+    "mergeNetsplitBlock": 0,
+    "terminalTotalDifficulty": 0
   },
   "nonce": "0x0",
   "timestamp": "0x0",
@@ -57,6 +60,9 @@ const genesis = {
       "code": paymasterHex
     },
     "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266": {
+      "balance": "0xffffffffffffffffffffffff"
+    },
+    "0x918c30482462c8024ba6cf34a18ba1f8bbdb755f": {
       "balance": "0xffffffffffffffffffffffff"
     }
   }
