@@ -1,4 +1,3 @@
-use alloy_primitives::U256;
 use serde::{Deserialize, Serialize};
 
 /// Static configurations loaded at startup.
@@ -91,10 +90,18 @@ pub struct DynamicConfig {
     pub manifold_quorum_threshold: usize,
     /// Minimum reputation required to promote social validators (e.g. 0.05).
     pub social_promotion_threshold: f64,
-    /// Gas payment threshold for Courier (e.g. 0.005 ETH).
-    pub required_gas_threshold: U256,
     /// Validator count threshold for MetaLex reality audit verification (e.g. 2).
     pub metalex_validator_count_threshold: usize,
+    /// Toggle to instantly mandate post-quantum signature verification schemes across the network.
+    #[serde(alias = "quantum_threat", default)]
+    pub zero_latency_quantum_trigger: bool,
+    /// Default post-quantum signature scheme mandated when Zero Latency Quantum Trigger is active (e.g. "mldsa", "slhdsa", "falcon").
+    #[serde(alias = "pq_scheme", default = "default_pq_scheme")]
+    pub default_pq_scheme: String,
+}
+
+fn default_pq_scheme() -> String {
+    "mldsa".to_string()
 }
 
 impl Default for DynamicConfig {
@@ -103,8 +110,10 @@ impl Default for DynamicConfig {
             sgx_reputation_threshold: 0.0,
             manifold_quorum_threshold: 500,
             social_promotion_threshold: 0.05,
-            required_gas_threshold: U256::from(5_000_000_000_000_000u64),
             metalex_validator_count_threshold: 2,
+            zero_latency_quantum_trigger: false,
+            default_pq_scheme: default_pq_scheme(),
         }
     }
 }
+

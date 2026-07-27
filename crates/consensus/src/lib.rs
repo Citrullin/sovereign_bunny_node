@@ -11,6 +11,8 @@ pub mod pool;
 pub mod config;
 /// Stateless EVM execution/validation.
 pub mod stateless;
+/// Native cryptographic verification.
+pub mod crypto;
 /// Namespaced Merkle Trees for state-diff partitioning.
 pub mod nmt;
 /// Validator registry and reputation.
@@ -25,8 +27,7 @@ pub mod slashing;
 pub mod parallel;
 /// Snow-based subset election.
 pub mod subset_election;
-/// Paymaster and courier services.
-pub mod courier;
+
 /// `PageRank` KZG commitments.
 pub mod kzg;
 /// MetaLex organization management.

@@ -49,6 +49,14 @@ pub struct SovereignArgs {
     /// Path to the TOML configuration file
     #[arg(long)]
     pub config: Option<std::path::PathBuf>,
+
+    /// Zero Latency Quantum Trigger flag (alias: quantum threat) to mandate post-quantum signature schemes
+    #[arg(long, alias = "quantum-threat", default_value_t = false)]
+    pub zero_latency_quantum_trigger: bool,
+
+    /// Default post-quantum signature scheme when Zero Latency Quantum Trigger is active (e.g., mldsa, slhdsa, falcon)
+    #[arg(long, alias = "pq-algo")]
+    pub pq_scheme: Option<String>,
 }
 
 impl Default for SovereignArgs {
@@ -60,6 +68,8 @@ impl Default for SovereignArgs {
             delegation_proof: None,
             merit_threshold: 0.0,
             config: None,
+            zero_latency_quantum_trigger: false,
+            pq_scheme: None,
         }
     }
 }
@@ -203,6 +213,20 @@ fn main() {
                 }
             }
         }
+
+        let env_quantum = std::env::var("QUANTUM_THREAT")
+            .map(|val| val == "true" || val == "1")
+            .unwrap_or(false);
+        if args.zero_latency_quantum_trigger || env_quantum {
+            dynamic_cfg.zero_latency_quantum_trigger = true;
+            info!("Zero Latency Quantum Trigger activated (mandating post-quantum signature schemes)");
+        }
+
+        if let Some(scheme) = args.pq_scheme.clone().or_else(|| std::env::var("PQ_SCHEME").ok()).or_else(|| std::env::var("DEFAULT_PQ_SCHEME").ok()) {
+            dynamic_cfg.default_pq_scheme = scheme.to_lowercase();
+            info!("Configured default post-quantum scheme: {}", dynamic_cfg.default_pq_scheme);
+        }
+
         let dynamic_cfg_arc = std::sync::Arc::new(std::sync::RwLock::new(dynamic_cfg));
         let _ = sovereign_consensus::registry::init_registry(static_cfg, dynamic_cfg_arc);
 
@@ -268,7 +292,6 @@ max_attempts = 500
 sgx_reputation_threshold = 0.5
 manifold_quorum_threshold = 100
 social_promotion_threshold = 0.1
-required_gas_threshold = "10000000000000000"
 metalex_validator_count_threshold = 5
 "#;
         std::fs::write(&file_path, toml_content).unwrap();
@@ -286,8 +309,8 @@ metalex_validator_count_threshold = 5
         assert_eq!(config.dynamic_cfg.sgx_reputation_threshold, 0.5);
         assert_eq!(config.dynamic_cfg.manifold_quorum_threshold, 100);
         assert_eq!(config.dynamic_cfg.social_promotion_threshold, 0.1);
-        assert_eq!(config.dynamic_cfg.required_gas_threshold, alloy_primitives::U256::from(10000000000000000u64));
         assert_eq!(config.dynamic_cfg.metalex_validator_count_threshold, 5);
+        assert_eq!(config.dynamic_cfg.default_pq_scheme, "mldsa");
 
         let _ = std::fs::remove_file(file_path);
     }

@@ -226,6 +226,91 @@ impl<T: PoolTransaction> TransactionOrdering for FCFSOrdering<T> {
     }
 }
 
+/// Custom validator wrapping any standard validator to enforce Zero Latency Quantum Trigger checks on pooled transactions.
+#[derive(Debug, Clone)]
+pub struct SovereignQuantumTransactionValidator<V> {
+    inner: V,
+}
+
+impl<V> SovereignQuantumTransactionValidator<V> {
+    /// Creates a new `SovereignQuantumTransactionValidator`.
+    pub fn new(inner: V) -> Self {
+        Self { inner }
+    }
+}
+
+impl<V, T, B> TransactionValidator for SovereignQuantumTransactionValidator<V>
+where
+    V: TransactionValidator<Transaction = T, Block = B>,
+    T: PoolTransaction,
+    B: reth_primitives_traits::Block,
+{
+    type Transaction = T;
+    type Block = B;
+
+    async fn validate_transaction(
+        &self,
+        origin: TransactionOrigin,
+        transaction: Self::Transaction,
+    ) -> TransactionValidationOutcome<Self::Transaction> {
+        let registry_lock = crate::registry::get_registry();
+        let (quantum_threat, default_pq_scheme) = if let Ok(reg) = registry_lock.read() {
+            let dynamic = reg.dynamic_cfg.read().unwrap();
+            (dynamic.zero_latency_quantum_trigger, dynamic.default_pq_scheme.clone())
+        } else {
+            (false, "mldsa".to_string())
+        };
+
+        if quantum_threat {
+            // Try to unpack PQ envelope from calldata / input
+            let Ok((scheme, pk, sig)) = crate::crypto::unpack_pq_envelope(transaction.input().as_ref()) else {
+                tracing::warn!(
+                    hash = ?transaction.hash(),
+                    "Rejecting standard transaction in pool: Zero Latency Quantum Trigger active (missing or invalid PQ envelope)"
+                );
+                return TransactionValidationOutcome::Invalid(
+                    transaction,
+                    InvalidTransactionError::TxTypeNotSupported.into(),
+                );
+            };
+
+            // Enforce PQ scheme matches default scheme configured
+            let configured_scheme = crate::crypto::parse_scheme(&default_pq_scheme).unwrap_or(crate::crypto::SignatureScheme::MlDsa);
+            if scheme != configured_scheme {
+                return TransactionValidationOutcome::Invalid(
+                    transaction,
+                    InvalidTransactionError::TxTypeNotSupported.into(),
+                );
+            }
+
+            // Verify signature natively
+            let msg = transaction.hash().as_slice();
+            if crate::crypto::verify_signature(scheme, &pk, msg, &sig, true).is_err() {
+                return TransactionValidationOutcome::Invalid(
+                    transaction,
+                    InvalidTransactionError::TxTypeNotSupported.into(),
+                );
+            }
+
+            // Verify sender matches derived address
+            let hash = alloy_primitives::keccak256(&pk);
+            let derived_addr = alloy_primitives::Address::from_slice(&hash[12..]);
+            if derived_addr != transaction.sender() {
+                return TransactionValidationOutcome::Invalid(
+                    transaction,
+                    InvalidTransactionError::TxTypeNotSupported.into(),
+                );
+            }
+        }
+
+        self.inner.validate_transaction(origin, transaction).await
+    }
+
+    fn on_new_head_block(&self, new_head: &reth_primitives_traits::SealedBlock<Self::Block>) {
+        self.inner.on_new_head_block(new_head);
+    }
+}
+
 /// Custom Pool Builder that sets up the FCFS transaction pool.
 #[derive(Debug, Clone, Default)]
 pub struct SovereignPoolBuilder {
@@ -249,11 +334,13 @@ where
     Evm: ConfigureEvm<Primitives = PrimitivesTy<Types>> + Clone + 'static,
 {
     type Pool = Pool<
-        TransactionValidationTaskExecutor<
-            reth_ethereum::pool::EthTransactionValidator<
-                N::Provider,
-                reth_ethereum::pool::EthPooledTransaction,
-                Evm,
+        SovereignQuantumTransactionValidator<
+            TransactionValidationTaskExecutor<
+                reth_ethereum::pool::EthTransactionValidator<
+                    N::Provider,
+                    reth_ethereum::pool::EthPooledTransaction,
+                    Evm,
+                >,
             >,
         >,
         FCFSOrdering<reth_ethereum::pool::EthPooledTransaction>,
@@ -268,15 +355,17 @@ where
         let data_dir = ctx.config().datadir();
         let blob_store = InMemoryBlobStore::default();
 
-        let validator =
+        let eth_validator =
             TransactionValidationTaskExecutor::eth_builder(ctx.provider().clone(), evm_config)
                 .kzg_settings(ctx.kzg_settings()?)
                 .with_additional_tasks(ctx.config().txpool.additional_validation_tasks)
                 .build_with_tasks(ctx.task_executor().clone(), blob_store.clone());
 
+        let validator = SovereignQuantumTransactionValidator::new(eth_validator);
+
         let transaction_pool =
             Pool::new(validator, FCFSOrdering::new(), blob_store, self.pool_config);
-        info!(target: "reth::cli", "Sovereign FCFS Transaction pool initialized");
+        info!(target: "reth::cli", "Sovereign FCFS Transaction pool initialized (with Zero Latency Quantum Trigger enforcement)");
 
         let transactions_path = data_dir.txpool_transactions();
         {
@@ -326,6 +415,38 @@ pub fn validate_witness<T: PoolTransaction>(
     // Instant rejection if witness is empty
     if transaction.witness.is_empty() {
         return false;
+    }
+
+    let registry_lock = crate::registry::get_registry();
+    let (quantum_threat, default_pq_scheme) = if let Ok(reg) = registry_lock.read() {
+        let dynamic = reg.dynamic_cfg.read().unwrap();
+        (dynamic.zero_latency_quantum_trigger, dynamic.default_pq_scheme.clone())
+    } else {
+        (false, "mldsa".to_string())
+    };
+
+    if quantum_threat {
+        // Try to unpack PQ envelope from witness
+        let Ok((scheme, pk, sig)) = crate::crypto::unpack_pq_envelope(&transaction.witness) else {
+            return false;
+        };
+
+        // Enforce PQ constraints matching default scheme
+        let configured_scheme = crate::crypto::parse_scheme(&default_pq_scheme).unwrap_or(crate::crypto::SignatureScheme::MlDsa);
+        if scheme != configured_scheme {
+            return false;
+        }
+
+        // Verify signature natively
+        let msg = transaction.transaction.hash().as_slice();
+        if crate::crypto::verify_signature(scheme, &pk, msg, &sig, true).is_err() {
+            return false;
+        }
+
+        // Verify sender address matches keccak256(public_key)[12..32]
+        let hash = alloy_primitives::keccak256(&pk);
+        let derived_addr = alloy_primitives::Address::from_slice(&hash[12..]);
+        return derived_addr == transaction.transaction.sender();
     }
 
     if cfg!(debug_assertions) || std::env::var("SOVEREIGN_MOCK_WITNESS").is_ok() {
@@ -472,9 +593,11 @@ mod tests {
 
     #[test]
     fn test_witness_validation() {
+        use crate::crypto::{pack_pq_envelope, SignatureScheme};
+
         let tx = MockTransaction::eip1559();
         let mut tx_with_witness = TransactionWithWitness {
-            transaction: tx,
+            transaction: tx.clone(),
             witness: vec![],
         };
 
@@ -487,9 +610,110 @@ mod tests {
         tx_with_witness.witness = vec![0x12, 0x34, 0x56, 0x78];
         assert!(!validate_witness(&tx_with_witness, root));
 
-        // Valid witness (prefix deadbeef) should pass
+        // Valid witness (prefix deadbeef) should pass when quantum trigger is false
+        let registry_lock = crate::registry::get_registry();
+        {
+            let mut reg = registry_lock.write().unwrap();
+            *reg = crate::registry::ValidatorRegistry::default();
+            let mut dynamic = reg.dynamic_cfg.write().unwrap();
+            dynamic.zero_latency_quantum_trigger = false;
+        }
         tx_with_witness.witness = vec![0xde, 0xad, 0xbe, 0xef, 0x01, 0x02];
         assert!(validate_witness(&tx_with_witness, root));
+
+        // When quantum trigger is true, PQ envelope is required
+        {
+            let mut reg = registry_lock.write().unwrap();
+            *reg = crate::registry::ValidatorRegistry::default();
+            let mut dynamic = reg.dynamic_cfg.write().unwrap();
+            dynamic.zero_latency_quantum_trigger = true;
+            dynamic.default_pq_scheme = "mldsa".to_string();
+        }
+
+        // Pack PQ envelope in witness
+        let pk = vec![1; 32];
+        let sig = vec![2; 64];
+        let env_bytes = pack_pq_envelope(SignatureScheme::MlDsa, &pk, &sig);
+
+        // Derived sender EVM address matching key
+        let hash = alloy_primitives::keccak256(&pk);
+        let derived_addr = alloy_primitives::Address::from_slice(&hash[12..]);
+
+        let mut pq_tx = MockTransaction::eip1559();
+        pq_tx.set_sender(derived_addr);
+
+        let pq_tx_with_witness = TransactionWithWitness {
+            transaction: pq_tx,
+            witness: env_bytes,
+        };
+
+        assert!(validate_witness(&pq_tx_with_witness, root));
+
+        // Clean up
+        {
+            let reg = registry_lock.read().unwrap();
+            let mut dynamic = reg.dynamic_cfg.write().unwrap();
+            dynamic.zero_latency_quantum_trigger = false;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_quantum_transaction_validator() {
+        use reth_transaction_pool::test_utils::MockTransaction;
+        use reth_transaction_pool::noop::MockTransactionValidator;
+        use crate::crypto::{pack_pq_envelope, SignatureScheme};
+
+        let validator = SovereignQuantumTransactionValidator::new(MockTransactionValidator::default());
+        let tx = MockTransaction::eip1559();
+
+        let registry_lock = crate::registry::get_registry();
+        {
+            let mut reg = registry_lock.write().unwrap();
+            *reg = crate::registry::ValidatorRegistry::default();
+            let mut dynamic = reg.dynamic_cfg.write().unwrap();
+            dynamic.zero_latency_quantum_trigger = false;
+            dynamic.default_pq_scheme = "mldsa".to_string();
+        }
+
+        // When quantum trigger is false, transaction is valid
+        let res = validator.validate_transaction(TransactionOrigin::External, tx.clone()).await;
+        assert!(matches!(res, TransactionValidationOutcome::Valid { .. }));
+
+        // Enable quantum trigger
+        {
+            let reg = registry_lock.read().unwrap();
+            let mut dynamic = reg.dynamic_cfg.write().unwrap();
+            dynamic.zero_latency_quantum_trigger = true;
+        }
+
+        // When quantum trigger is true, standard transaction (without PQ envelope) MUST be rejected
+        let res = validator.validate_transaction(TransactionOrigin::External, tx.clone()).await;
+        assert!(matches!(res, TransactionValidationOutcome::Invalid(_, _)));
+
+        // Create a transaction with a valid PQ envelope in input calldata
+        let pk = vec![1; 32];
+        let sig = vec![2; 64];
+        let env_bytes = pack_pq_envelope(SignatureScheme::MlDsa, &pk, &sig);
+
+        // Derive EVM address of sender matching derived key
+        let hash = alloy_primitives::keccak256(&pk);
+        let derived_addr = alloy_primitives::Address::from_slice(&hash[12..]);
+
+        // Reconstruct mock transaction with our envelope calldata and matching sender
+        let mut pq_tx = MockTransaction::eip1559();
+        pq_tx.set_input(env_bytes.into());
+        pq_tx.set_sender(derived_addr);
+
+        // Validate PQ envelope transaction
+        let res = validator.validate_transaction(TransactionOrigin::External, pq_tx).await;
+        assert!(matches!(res, TransactionValidationOutcome::Valid { .. }));
+
+        // Clean up
+        {
+            let reg = registry_lock.read().unwrap();
+            let mut dynamic = reg.dynamic_cfg.write().unwrap();
+            dynamic.zero_latency_quantum_trigger = false;
+        }
     }
 }
 

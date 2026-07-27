@@ -218,8 +218,11 @@ impl ValidatorRegistry {
                 let hash = alloy_primitives::keccak256(&uncompressed.as_bytes()[1..]);
                 Address::from_slice(&hash[12..32])
             }
-            sovereign_identity::KeyType::Ed25519 => {
-                // For Ed25519, hash public key bytes directly to produce EVM Address
+            sovereign_identity::KeyType::Ed25519 |
+            sovereign_identity::KeyType::MlDsa |
+            sovereign_identity::KeyType::SlhDsa |
+            sovereign_identity::KeyType::Falcon => {
+                // For other algorithms, hash public key bytes directly to produce EVM Address
                 let hash = alloy_primitives::keccak256(&resolved.public_key);
                 Address::from_slice(&hash[12..32])
             }
@@ -309,6 +312,17 @@ impl ValidatorRegistry {
         }
         
         routable
+    }
+
+    /// Filters routable validators for target_manifold_id that meet the minimum orchestrator reputation/merit threshold.
+    pub fn get_eligible_orchestrators(&self, target_manifold_id: u64, min_orchestrator_merit: f64) -> HashSet<Address> {
+        let mut eligible = HashSet::new();
+        for addr in self.get_routable_validators(target_manifold_id) {
+            if self.get_reputation_by_address(&addr) >= min_orchestrator_merit {
+                eligible.insert(addr);
+            }
+        }
+        eligible
     }
 
     /// Computes `TinyMeritRank` reputation using Personalized `PageRank`.

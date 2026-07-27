@@ -50,9 +50,10 @@ State availability is completely offloaded to a local IPFS/IPLD Cluster.
 * **Namespaced Merkle Trees (NMTs):** Blocks are formatted as NMTs. Applications are assigned unique namespaces (e.g., `NS_02` for Nextcloud). Validators only download and verify state diffs for the namespaces they care about.
 * **Data Availability Sampling (DAS):** Low-power edge devices act as DAS light nodes, randomly sampling 16 IPLD chunks (2D Reed-Solomon Erasure Coded) to verify block availability before signing consensus.
 
-### 5. BGP-Style Based Meshing & Cross-Manifold Precompiles
-We treat separate manifolds like Autonomous Systems (AS) in BGP internet routing, lowered into native EVM executions and non-interactive ZK proof verification:
-* **The Cross-Manifold Precompile (`0xff`):** Cross-chain intents compile to a `STATICCALL` to precompile `0xff` (`CROSS_MANIFOLD_PRECOMPILE_ADDRESS`). Instead of interactive HTLC time-locks or rollback sagas, the precompile verifies a succinct universal recursive ZK validity proof (SP1, RiscZero, Groth16) in $O(1)$ constant time.
+### 5. Saga Orchestrators Committee Consensus & Zero Latency Quantum Trigger
+We treat separate manifolds like Autonomous Systems (AS) in BGP internet routing, utilizing a rotating sub-committee of validators (**Saga Orchestrators**) to coordinate cross-manifold executions:
+* **Saga Orchestrator Sub-Committee Consensus:** Instead of heavy lock/unlock sagas or simple time-locks, cross-manifold intents are verified by a deterministically rotated sub-committee of Saga Orchestrators selected via `SnowSubsetElection` from the registry of validators meeting a minimum reputation/merit threshold. The sub-committee cross-verifies execution results across target RPC endpoints.
+* **Zero Latency Quantum Trigger:** The protocol provides instantaneous crypto agility via the `QUANTUM_THREAT` / `zero_latency_quantum_trigger` configuration. When activated, all previously confirmed state roots remain valid, and from the very next block onward, validators, accounts, and saga orchestrators must sign and verify using post-quantum signature schemes (ML-DSA/Dilithium, SLH-DSA/SPHINCS+, Falcon) registered in their multi-key `did:peer:4` documents, rotating keys seamlessly on-the-fly.
 * **Programmable BGP Bandwidth SLAs:** Overlapping border routers act as Althea pay-per-forward relayers. When a ZK proof of SLA settlement is verified in precompile `0xff`, the node programmatically allocates UDP WireGuard tunnels (`wg0`) and advertises the new forwarding rates across its dynamic BGP routing table.
 
 ### 6. ZKP Federated Identity (Authentik + SIWE)
@@ -132,16 +133,14 @@ sovereign-reth/
     │   ├── src/
     │   │   ├── sgx.rs         # /dev/sgx_enclave via Gramine
     │   │   └── mock.rs        # Mock provider for Vanilla nodes
-    ├── identity/              # did:peer:4, PoR Resolver, and ZKP Auth
+    ├── identity/              # did:peer:4, PoR Resolver and ZKP Auth
     │   ├── src/
     │   │   ├── delegation.rs  # Session-key authorization checks
-    │   │   ├── merit.rs       # Interfaces local TiKV/MDBX TinyMeritRank
     │   │   └── zkp_auth.rs    # SIWE/Authentik ZKP verification logic
     └── network/               # Physical Layer & Peering
         ├── src/
             ├── wireguard.rs   # wg0 interface management
-            ├── handshake.rs   # Single-Key derivation & Zero-Config peering
-            └── bgp_gossip.rs  # Overlapping validator cross-manifold routing queues
+            └── handshake.rs   # Single-Key derivation & Zero-Config peering
 ```
 
 ---

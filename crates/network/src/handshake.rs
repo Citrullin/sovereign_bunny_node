@@ -66,6 +66,25 @@ impl KeyDeriver {
         out_pub.copy_from_slice(pub_point.as_bytes());
         (priv_bytes, out_pub)
     }
+
+    /// Derives a post-quantum keypair based on the scheme.
+    #[must_use]
+    pub fn derive_pq_keypair(&self, scheme: sovereign_identity::KeyType) -> (Vec<u8>, Vec<u8>) {
+        let prefix: &[u8] = match scheme {
+            sovereign_identity::KeyType::MlDsa => b"mldsa",
+            sovereign_identity::KeyType::SlhDsa => b"slhdsa",
+            sovereign_identity::KeyType::Falcon => b"falcon",
+            _ => b"mldsa",
+        };
+        let mut seed = Vec::new();
+        seed.extend_from_slice(prefix);
+        seed.extend_from_slice(&self.master_seed);
+        let priv_bytes = keccak256(&seed).0.to_vec();
+        // Return derived mock PQ key pair bytes based on master seed
+        let mut pub_bytes = priv_bytes.clone();
+        pub_bytes.reverse(); // simple deterministic mock public key
+        (priv_bytes, pub_bytes)
+    }
 }
 
 /// Zero-configuration mesh handshaker that processes NFC taps to establish peering.
@@ -101,26 +120,7 @@ impl ZeroConfigMesh {
         let resolved = futures::executor::block_on(sovereign_identity::DidPeer4::resolve(did))
             .map_err(|_| "Failed to resolve DID for signature verification")?;
 
-        match resolved.key_type {
-            sovereign_identity::KeyType::Ed25519 => {
-                use ed25519_dalek::{Verifier, Signature, VerifyingKey};
-                let sig = Signature::from_slice(&creds.dynamic_signature)
-                    .map_err(|_| "Invalid Ed25519 signature format")?;
-                let public_key = VerifyingKey::from_bytes(&resolved.public_key[0..32].try_into().map_err(|_| "Invalid Ed25519 public key length")?)
-                    .map_err(|_| "Invalid Ed25519 public key")?;
-                public_key.verify(&creds.challenge, &sig)
-                    .map_err(|_| "Ed25519 signature verification failed")?;
-            }
-            sovereign_identity::KeyType::Secp256k1 => {
-                use k256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
-                let sig = Signature::from_slice(&creds.dynamic_signature)
-                    .map_err(|_| "Invalid Secp256k1 signature format")?;
-                let public_key = VerifyingKey::from_sec1_bytes(&resolved.public_key)
-                    .map_err(|_| "Invalid Secp256k1 public key")?;
-                public_key.verify(&creds.challenge, &sig)
-                    .map_err(|_| "Secp256k1 signature verification failed")?;
-            }
-        }
+        resolved.verify_signature(&creds.challenge, &creds.dynamic_signature, false)?;
 
         // 2. Configure Wireguard interface
         self.wg_manager

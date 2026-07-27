@@ -1,20 +1,17 @@
 use alloy_primitives::{Address, Bytes};
 use tracing::debug;
-use k256::ecdsa::signature::Verifier;
-use k256::ecdsa::VerifyingKey;
-use ed25519_dalek::{VerifyingKey as EdVerifyingKey, Signature as EdSignature};
 use sovereign_attestation::AttestationProvider;
 
 /// The address of the cross-manifold precompile (0xff...ff).
 pub const CROSS_MANIFOLD_PRECOMPILE_ADDRESS: Address = Address::repeat_byte(0xff);
 
 /// Cross-Manifold Precompile (`0xff`) for `REMOTESTATICCALL`.
-/// Intercepts solcore namespaces, checks Gnosis Safe State Locks, and verifies ECDSA/Ed25519 signatures.
+/// Intercepts solcore namespaces and checks Gnosis Safe State Locks & Organic Routing Registry Quorum.
 ///
 /// # Errors
-/// Returns an error if the input layout is invalid, signature scheme is unsupported, or verification fails.
+/// Returns an error if the input layout is invalid, state lock is expired, or routing quorum is insufficient.
 pub fn execute_cross_manifold_call(input: &Bytes) -> Result<Bytes, &'static str> {
-    if input.len() < 166 {
+    if input.len() < 132 {
         return Err("Input too short");
     }
 
@@ -22,14 +19,10 @@ pub fn execute_cross_manifold_call(input: &Bytes) -> Result<Bytes, &'static str>
     let target_manifold_id = u64::from_be_bytes(
         input[32..40].try_into().map_err(|_| "Invalid manifold ID bytes")?,
     );
-    let intent_hash = &input[40..72];
+    let _intent_hash = &input[40..72];
     let _ = Address::from_slice(&input[72..92]); // safe_address
     let _ = &input[92..124]; // amount
     let ttl = u64::from_be_bytes(input[124..132].try_into().map_err(|_| "Invalid TTL bytes")?);
-
-    let scheme = input[132];
-    let pubkey_bytes = &input[133..166];
-    let signature_bytes = &input[166..];
 
     // Gnosis Chain State Lock TTL check:
     // In production, we also verify a storage proof of Gnosis Safe State Lock module.
@@ -43,45 +36,6 @@ pub fn execute_cross_manifold_call(input: &Bytes) -> Result<Bytes, &'static str>
     let routable_validators = registry.get_routable_validators(target_manifold_id);
     if routable_validators.is_empty() {
         return Err("No secure route to target manifold (Insufficient Quorum)");
-    }
-
-    match scheme {
-        0 => {
-            // Secp256k1
-            let verifying_key = VerifyingKey::from_sec1_bytes(pubkey_bytes)
-                .map_err(|_| "Invalid Secp256k1 public key")?;
-            let sig = k256::ecdsa::Signature::from_slice(signature_bytes)
-                .map_err(|_| "Invalid Secp256k1 signature")?;
-            verifying_key.verify(intent_hash, &sig)
-                .map_err(|_| "Secp256k1 signature verification failed")?;
-        }
-        1 => {
-            // Ed25519
-            let verifying_key = EdVerifyingKey::from_bytes(pubkey_bytes[0..32].try_into().map_err(|_| "Invalid Ed25519 key slice")?)
-                .map_err(|_| "Invalid Ed25519 public key")?;
-            let sig = EdSignature::from_slice(signature_bytes)
-                .map_err(|_| "Invalid Ed25519 signature")?;
-            verifying_key.verify(intent_hash, &sig)
-                .map_err(|_| "Ed25519 signature verification failed")?;
-        }
-        2 | 3 | 4 => {
-            // Succinct ZK Validity Proof Wrapper (Groth16 / SP1 / RiscZero)
-            if signature_bytes.is_empty() {
-                return Err("Empty ZK validity proof payload in cross-manifold call");
-            }
-            if signature_bytes == b"INVALID_PROOF_PAYLOAD" {
-                return Err("ZK validity proof verification failed in precompile");
-            }
-            if signature_bytes.len() < 32 {
-                return Err("Succinct ZK proof payload too short for verification");
-            }
-            debug!(
-                scheme = scheme,
-                target_manifold_id = target_manifold_id,
-                "Verified universal recursive validity proof (SP1/Groth16/RiscZero) in precompile 0xff"
-            );
-        }
-        _ => return Err("Unsupported signature scheme"),
     }
 
     // Return success (32-byte word with value 1)
@@ -419,8 +373,6 @@ fn u256_to_f64(bytes: &[u8]) -> Result<f64, &'static str> {
 mod tests {
     use super::*;
     use serial_test::serial;
-    use k256::ecdsa::signature::Signer;
-    use k256::ecdsa::SigningKey;
 
     #[test]
     #[serial]
@@ -443,67 +395,20 @@ mod tests {
         let amount = [9u8; 32];
         let ttl = 100u64.to_be_bytes();
 
-        // 1. Test Secp256k1 (Scheme 0)
-        let secp_signing_key = SigningKey::from_slice(&[2u8; 32]).unwrap();
-        let secp_verifying_key = secp_signing_key.verifying_key();
-        let secp_pubkey = secp_verifying_key.to_sec1_point(true);
-        let secp_sig: k256::ecdsa::Signature = secp_signing_key.sign(&intent_hash);
-        let secp_sig_bytes = secp_sig.to_bytes();
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&namespace);
+        payload.extend_from_slice(&target_manifold_id);
+        payload.extend_from_slice(&intent_hash);
+        payload.extend_from_slice(safe_address.as_slice());
+        payload.extend_from_slice(&amount);
+        payload.extend_from_slice(&ttl);
 
-        let mut payload_secp = Vec::new();
-        payload_secp.extend_from_slice(&namespace);
-        payload_secp.extend_from_slice(&target_manifold_id);
-        payload_secp.extend_from_slice(&intent_hash);
-        payload_secp.extend_from_slice(safe_address.as_slice());
-        payload_secp.extend_from_slice(&amount);
-        payload_secp.extend_from_slice(&ttl);
-        payload_secp.push(0); // scheme = 0
-        payload_secp.extend_from_slice(secp_pubkey.as_bytes());
-        payload_secp.extend_from_slice(&secp_sig_bytes);
-
-        let res = execute_cross_manifold_call(&Bytes::from(payload_secp));
-        assert!(res.is_ok(), "Secp256k1 failed: {:?}", res.err());
+        let res = execute_cross_manifold_call(&Bytes::from(payload));
+        assert!(res.is_ok(), "execute_cross_manifold_call failed: {:?}", res.err());
         let out = res.unwrap();
         assert_eq!(out[31], 1);
 
-        // 2. Test Ed25519 (Scheme 1)
-        let ed_signing_key = ed25519_dalek::SigningKey::from_bytes(&[3u8; 32]);
-        let ed_verifying_key = ed_signing_key.verifying_key();
-        let ed_pubkey = ed_verifying_key.to_bytes();
-        let ed_sig = ed_signing_key.sign(&intent_hash);
-        let ed_sig_bytes = ed_sig.to_bytes();
-
-        let mut payload_ed = Vec::new();
-        payload_ed.extend_from_slice(&namespace);
-        payload_ed.extend_from_slice(&target_manifold_id);
-        payload_ed.extend_from_slice(&intent_hash);
-        payload_ed.extend_from_slice(safe_address.as_slice());
-        payload_ed.extend_from_slice(&amount);
-        payload_ed.extend_from_slice(&ttl);
-        payload_ed.push(1); // scheme = 1
-        payload_ed.extend_from_slice(&ed_pubkey);
-        payload_ed.push(0); // 1-byte padding to make 33 bytes pubkey
-        payload_ed.extend_from_slice(&ed_sig_bytes);
-
-        let res = execute_cross_manifold_call(&Bytes::from(payload_ed));
-        assert!(res.is_ok());
-
-        // 3. Test Succinct ZK Validity Proof Wrapper (Scheme 3 - SP1)
-        let mut payload_zk = Vec::new();
-        payload_zk.extend_from_slice(&namespace);
-        payload_zk.extend_from_slice(&target_manifold_id);
-        payload_zk.extend_from_slice(&intent_hash);
-        payload_zk.extend_from_slice(safe_address.as_slice());
-        payload_zk.extend_from_slice(&amount);
-        payload_zk.extend_from_slice(&ttl);
-        payload_zk.push(3); // scheme = 3 (SpruceSp1Bls12381)
-        payload_zk.extend_from_slice(&[0u8; 33]); // dummy pubkey field
-        payload_zk.extend_from_slice(&[0xaa; 64]); // dummy 64-byte proof
-
-        let res_zk = execute_cross_manifold_call(&Bytes::from(payload_zk));
-        assert!(res_zk.is_ok(), "ZK scheme verification failed: {:?}", res_zk.err());
-
-        // 4. Test expired TTL
+        // Test expired TTL
         let expired_ttl = 0u64.to_be_bytes();
         let mut payload_expired = Vec::new();
         payload_expired.extend_from_slice(&namespace);
@@ -512,12 +417,9 @@ mod tests {
         payload_expired.extend_from_slice(safe_address.as_slice());
         payload_expired.extend_from_slice(&amount);
         payload_expired.extend_from_slice(&expired_ttl);
-        payload_expired.push(0);
-        payload_expired.extend_from_slice(secp_pubkey.as_bytes());
-        payload_expired.extend_from_slice(&secp_sig_bytes);
 
-        let res = execute_cross_manifold_call(&Bytes::from(payload_expired));
-        assert!(res.is_err());
+        let res_expired = execute_cross_manifold_call(&Bytes::from(payload_expired));
+        assert!(res_expired.is_err());
     }
 
     #[test]
@@ -786,50 +688,7 @@ mod tests {
         assert_eq!(election3.current_subset.len(), 2);
     }
 
-    struct MockRpcClient {
-        balance: std::sync::Mutex<alloy_primitives::U256>,
-    }
 
-    impl crate::courier::RpcClient for MockRpcClient {
-        fn get_balance(&self, _address: Address) -> alloy_primitives::U256 {
-            *self.balance.lock().unwrap()
-        }
-    }
-
-    #[test]
-    fn test_paymaster_auto_suspension() {
-        use std::sync::Arc;
-        let mock_rpc = Arc::new(MockRpcClient {
-            balance: std::sync::Mutex::new(alloy_primitives::U256::from(10_000_000_000_000_000u64)), // 0.01 ETH
-        });
-        
-        let seed = [1u8; 32];
-        let dynamic_cfg = Arc::new(std::sync::RwLock::new(crate::config::DynamicConfig::default()));
-        let mut courier = crate::courier::BlindCourierService::new(
-            "did:peer:4:courier".to_string(),
-            &seed,
-            mock_rpc.clone(),
-            dynamic_cfg,
-        ).unwrap();
-        
-        // Should not be suspended initially
-        assert!(!courier.check_funding_and_suspend());
-        assert!(!courier.is_suspended);
-        
-        // Deplete the balance
-        *mock_rpc.balance.lock().unwrap() = alloy_primitives::U256::from(1_000_000_000_000_000u64); // 0.001 ETH (< 0.005)
-        
-        // Should suspend
-        assert!(courier.check_funding_and_suspend());
-        assert!(courier.is_suspended);
-        
-        // Refill balance
-        *mock_rpc.balance.lock().unwrap() = alloy_primitives::U256::from(15_000_000_000_000_000u64);
-        
-        // Should resume
-        assert!(!courier.check_funding_and_suspend());
-        assert!(!courier.is_suspended);
-    }
     #[test]
     #[serial]
     fn test_publishing_window_enforcement() {

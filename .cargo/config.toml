@@ -18,7 +18,7 @@ rustflags = [
     "-C", "opt-level=0",
     "-C", "debuginfo=0",
     "-C", "llvm-args=-threads=1",
-    "-C", "link-arg=-fuse-ld=gold",
+    "-C", "link-arg=-fuse-ld=mold",
     "-C", "link-arg=-Wl,--no-keep-memory",
     "-C", "link-arg=-Wl,--strip-all",
 ]

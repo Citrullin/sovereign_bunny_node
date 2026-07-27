@@ -120,6 +120,22 @@ pub fn validate_implicit_state_block(
         return Err("Missing consensus signatures for implicit state block");
     }
 
+    let registry_lock = crate::registry::get_registry();
+    let quantum_threat = if let Ok(reg) = registry_lock.read() {
+        reg.dynamic_cfg.read().unwrap().zero_latency_quantum_trigger
+    } else {
+        false
+    };
+
+    if quantum_threat {
+        for sig in signatures {
+            // Traditional ECDSA/EdDSA signatures are 64 or 65 bytes. Post-quantum signatures are significantly larger (> 100 bytes).
+            if sig.len() <= 65 {
+                return Err("Zero Latency Quantum Trigger active: traditional 64/65-byte signatures are forbidden in implicit state blocks");
+            }
+        }
+    }
+
     // 2. Mathematically compute the new State Root from the state diff
     if state_diff.is_empty() {
         return Err("Empty state diff in implicit block");
@@ -170,5 +186,32 @@ mod tests {
         let expected = alloy_primitives::keccak256(&preimage);
 
         assert_eq!(res, expected);
+    }
+
+    #[test]
+    fn test_implicit_state_block_quantum_trigger() {
+        let registry_lock = crate::registry::get_registry();
+        let mut reg = registry_lock.write().unwrap();
+        *reg = crate::registry::ValidatorRegistry::default();
+        reg.dynamic_cfg.write().unwrap().zero_latency_quantum_trigger = true;
+        drop(reg);
+
+        let signatures = vec![Bytes::from(vec![0x1u8; 65])];
+        let state_diff = vec![0x99];
+        let root = B256::repeat_byte(0xaa);
+
+        // Under quantum trigger, traditional 65-byte signature MUST be rejected
+        let res = validate_implicit_state_block(root, &state_diff, &signatures);
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err(), "Zero Latency Quantum Trigger active: traditional 64/65-byte signatures are forbidden in implicit state blocks");
+
+        // Post-quantum signature (> 65 bytes) should succeed
+        let pq_signatures = vec![Bytes::from(vec![0x1u8; 1312])];
+        let res_pq = validate_implicit_state_block(root, &state_diff, &pq_signatures);
+        assert!(res_pq.is_ok());
+
+        // Clean up
+        let reg = registry_lock.read().unwrap();
+        reg.dynamic_cfg.write().unwrap().zero_latency_quantum_trigger = false;
     }
 }

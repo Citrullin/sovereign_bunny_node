@@ -7,6 +7,5 @@
 /// Key derivation and Zero-KMS handshake module.
 pub mod handshake;
 pub mod wireguard;
-pub mod bgp_gossip;
 pub mod das;
 pub mod xroad;

@@ -10855,6 +10855,7 @@ dependencies = [
  "alloy-eips",
  "alloy-primitives",
  "boringtun",
+ "bs58",
  "c-kzg",
  "did-peer",
  "ed25519-dalek 3.0.0",

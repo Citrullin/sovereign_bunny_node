@@ -61,11 +61,11 @@ if [ "$CLEAN_ONLY" = true ]; then
   exit 0
 fi
 
-# Start sccache server with a 1.5GB virtual memory limit
+# Start sccache server without artificial virtual memory limits (single-thread jobs=1 prevents host OOM)
 if command -v sccache >/dev/null 2>&1; then
-  echo "=== Starting sccache with Memory Limits (3.5GB) ==="
+  echo "=== Starting sccache ==="
   sccache --stop-server 2>/dev/null || true
-  (ulimit -v 3670016 && sccache --start-server) 2>/dev/null || true
+  sccache --start-server 2>/dev/null || true
 fi
 
 echo "=== Step 1: Compiling Smart Contracts ==="
@@ -81,9 +81,9 @@ echo "=== Step 3: Compiling Node ==="
 # Export compilation flags that enforce single-job execution and high-split LLVM compilation units
 export RUSTC_BOOTSTRAP=1
 # Use codegen-units=16 to dramatically reduce peak compiler memory compared to codegen-units=1
-export RUSTFLAGS="-Z mir-opt-level=0 -C codegen-units=16 -C opt-level=0 -C debuginfo=0 -C llvm-args=-threads=1 -C link-arg=-fuse-ld=gold -C link-arg=-Wl,--no-keep-memory -C link-arg=-Wl,--strip-all"
-export CXX=clang++
-export CC=clang
+export RUSTFLAGS="-Z mir-opt-level=0 -C codegen-units=16 -C opt-level=0 -C debuginfo=0 -C llvm-args=-threads=1 -C link-arg=-fuse-ld=mold -C link-arg=-Wl,--no-keep-memory -C link-arg=-Wl,--strip-all"
+export CXX=g++
+export CC=gcc
 export NUM_JOBS=1
 export CARGO_INCREMENTAL=0
 export CARGO_BUILD_JOBS=1

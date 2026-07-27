@@ -3,7 +3,7 @@
 //! Implements `BasedMeshPacket`, Block-in-Blob serialization, EIP-4844 / PeerDAS blob formatting,
 //! and succinct ZK validity proof wrapper verification (SP1 / RiscZero / Groth16).
 
-use alloy_primitives::B256;
+use alloy_primitives::{Address, B256};
 use serde::{Deserialize, Serialize};
 
 /// Supported succinct zero-knowledge proving schemes for cross-manifold verification.
@@ -29,6 +29,21 @@ impl TryFrom<u8> for ProofScheme {
             _ => Err("Unsupported proof scheme selector"),
         }
     }
+}
+
+/// A structured, typed message transmitted over succinct ZK validity proofs / attestations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CrossManifoldMessage {
+    /// Unique message or intent ID.
+    pub message_id: B256,
+    /// Sender address on the source manifold.
+    pub sender: Address,
+    /// Recipient address on the target manifold.
+    pub recipient: Address,
+    /// Arbitrary message payload or ABI-encoded call data.
+    pub payload: Vec<u8>,
+    /// Timestamp when the message was emitted.
+    pub timestamp: u64,
 }
 
 /// A self-contained cross-manifold packet emitted during based meshing.
@@ -222,6 +237,46 @@ impl BasedMeshPacket {
 
         Ok(true)
     }
+
+    /// Wraps a cross-manifold message inside an attestation packet with a succinct validity proof.
+    ///
+    /// # Errors
+    /// Returns an error if serialization fails.
+    pub fn from_message(
+        source_manifold_id: u64,
+        target_manifold_id: u64,
+        state_diff_blob_hash: B256,
+        proof_scheme: ProofScheme,
+        attestation_proof: Vec<u8>,
+        message: &CrossManifoldMessage,
+    ) -> Result<Self, &'static str> {
+        let serialized_message = serde_json::to_vec(message)
+            .map_err(|_| "Failed to serialize CrossManifoldMessage")?;
+        Ok(Self {
+            version: 1,
+            source_manifold_id,
+            target_manifolds: vec![target_manifold_id],
+            state_diff_blob_hash,
+            kzg_commitment: vec![1u8; 48],
+            kzg_proof: vec![2u8; 48],
+            proof_scheme,
+            zkevm_proof_payload: attestation_proof,
+            execution_payload: serialized_message,
+        })
+    }
+
+    /// Verifies the validity proof / attestation and extracts the embedded cross-manifold message.
+    ///
+    /// # Errors
+    /// Returns an error if verification fails or deserialization fails.
+    pub fn extract_message(&self) -> Result<CrossManifoldMessage, &'static str> {
+        // Verify the succinct validity proof / attestation
+        self.verify_validity_proof()?;
+
+        // Deserialize the message from the execution payload
+        serde_json::from_slice(&self.execution_payload)
+            .map_err(|_| "Failed to deserialize CrossManifoldMessage from execution payload")
+    }
 }
 
 #[cfg(test)]
@@ -289,5 +344,32 @@ mod tests {
             vec![],
         );
         assert!(invalid_packet.verify_validity_proof().is_err());
+    }
+
+    #[test]
+    fn test_cross_manifold_message_packing_and_verification() {
+        let msg = CrossManifoldMessage {
+            message_id: B256::repeat_byte(0x77),
+            sender: Address::repeat_byte(0x11),
+            recipient: Address::repeat_byte(0x22),
+            payload: b"hello cross-manifold".to_vec(),
+            timestamp: 123456789,
+        };
+
+        // Create packet using from_message
+        let packet = BasedMeshPacket::from_message(
+            100,
+            200,
+            B256::repeat_byte(0x88),
+            ProofScheme::SpruceSp1Bls12381,
+            vec![0u8; 32], // Valid mock proof length >= 32
+            &msg,
+        ).expect("Failed to create packet from message");
+
+        // Verify and extract message
+        let extracted = packet.extract_message().expect("Failed to extract message");
+        assert_eq!(extracted, msg);
+        assert_eq!(packet.source_manifold_id, 100);
+        assert_eq!(packet.target_manifolds, vec![200]);
     }
 }
