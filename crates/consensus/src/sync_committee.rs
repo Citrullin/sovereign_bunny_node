@@ -22,10 +22,17 @@ pub struct SagaOrchestratorCommittee {
 
 impl Default for SagaOrchestratorCommittee {
     fn default() -> Self {
+        let registry_lock = crate::registry::get_registry();
+        let threshold = if let Ok(reg) = registry_lock.read() {
+            reg.dynamic_cfg.read().unwrap().committee_threshold
+        } else {
+            0.67
+        };
+
         Self {
             epoch: 0,
             orchestrators: HashSet::new(),
-            threshold: 0.67,
+            threshold,
             min_orchestrator_merit: 0.05,
         }
     }
@@ -41,6 +48,8 @@ impl SagaOrchestratorCommittee {
         let registry_lock = crate::registry::get_registry();
         let registry = registry_lock.read().map_err(|_| "Failed to lock registry")?;
         
+        self.threshold = registry.dynamic_cfg.read().unwrap().committee_threshold;
+
         let eligible = registry.get_eligible_orchestrators(target_manifold_id, self.min_orchestrator_merit);
         if eligible.is_empty() {
             return Err("No eligible orchestrators with sufficient merit rank");
@@ -73,12 +82,19 @@ pub struct SagaIntent {
 impl SagaIntent {
     /// Creates a new saga intent.
     pub fn new(intent_id: B256, sender: Address, recipient: Address, amount: U256, current_time: u64) -> Self {
+        let registry_lock = crate::registry::get_registry();
+        let timeout = if let Ok(reg) = registry_lock.read() {
+            reg.dynamic_cfg.read().unwrap().saga_intent_timeout_seconds
+        } else {
+            86400
+        };
+
         Self {
             intent_id,
             sender,
             recipient,
             amount,
-            expires_at: current_time + 86400, // 1 day expiration
+            expires_at: current_time + timeout,
             orchestrator_signatures: Vec::new(),
         }
     }
@@ -97,10 +113,16 @@ impl SagaIntent {
             return Err("Committee is empty");
         }
 
-        let required_quorum = ((committee.orchestrators.len() as f64) * committee.threshold).ceil() as usize;
+        let registry_lock = crate::registry::get_registry();
+        let threshold = if let Ok(reg) = registry_lock.read() {
+            reg.dynamic_cfg.read().unwrap().committee_threshold
+        } else {
+            committee.threshold
+        };
+
+        let required_quorum = ((committee.orchestrators.len() as f64) * threshold).ceil() as usize;
         let mut valid_votes = HashSet::new();
 
-        let registry_lock = crate::registry::get_registry();
         let registry = registry_lock.read().map_err(|_| "Failed to lock registry")?;
 
         for (addr, sig) in &self.orchestrator_signatures {

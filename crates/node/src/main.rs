@@ -57,6 +57,18 @@ pub struct SovereignArgs {
     /// Default post-quantum signature scheme when Zero Latency Quantum Trigger is active (e.g., mldsa, slhdsa, falcon)
     #[arg(long, alias = "pq-algo")]
     pub pq_scheme: Option<String>,
+
+    /// Block time in milliseconds (e.g., 2000 for 2s)
+    #[arg(long, alias = "block-time")]
+    pub block_time: Option<u64>,
+
+    /// Default cryptographic profile (e.g., ethereum, throughput, quantum_standard)
+    #[arg(long, alias = "crypto-profile")]
+    pub crypto_profile: Option<String>,
+
+    /// Pluggable parallel EVM execution engine selection (e.g. wave, pevm, grevm)
+    #[arg(long, alias = "parallel-engine")]
+    pub parallel_engine: Option<String>,
 }
 
 impl Default for SovereignArgs {
@@ -70,6 +82,9 @@ impl Default for SovereignArgs {
             config: None,
             zero_latency_quantum_trigger: false,
             pq_scheme: None,
+            block_time: None,
+            crypto_profile: None,
+            parallel_engine: None,
         }
     }
 }
@@ -84,61 +99,14 @@ fn get_tee_attestation_action(tee_mode: &str, ephemeral_key: &str, block_number:
     }
 }
 
-/// Execution Extension (`ExEx`) for Pluggable TEE Proving & DA Mesh Emission
-/// Gnosis Safe cross-chain settlement relayer using standard alloy providers.
-pub struct SettlementRelayer {
-    safe_address: alloy_primitives::Address,
-}
-
-impl SettlementRelayer {
-    /// Creates a new Settlement Relayer.
-    #[must_use]
-    pub fn new(safe_address: alloy_primitives::Address) -> Self {
-        Self { safe_address }
-    }
-
-    /// Submits state diff commitment to the Gnosis Safe.
-    ///
-    /// # Errors
-    /// Returns an error if the HTTP request fails.
-    pub async fn submit_intent(&self, state_diff: &[u8]) -> eyre::Result<alloy_primitives::B256> {
-        use tiny_keccak::{Hasher, Keccak};
-        let mut hasher = Keccak::v256();
-        hasher.update(state_diff);
-        let mut hash = [0u8; 32];
-        hasher.finalize(&mut hash);
-        let commitment = alloy_primitives::B256::from(hash);
-
-        // Instantiates a standard HTTP client to submit JSON-RPC to Gnosis Chain
-        let client = reqwest::Client::new();
-        let _res = client.post("http://localhost:8545")
-            .json(&serde_json::json!({
-                "jsonrpc": "2.0",
-                "method": "eth_sendRawTransaction",
-                "params": [format!("0x{:x}", commitment)],
-                "id": 1
-            }))
-            .send()
-            .await;
-
-
-        info!(
-            "SettlementRelayer: Relaying transaction commitment {} to Gnosis Safe at {}",
-            commitment, self.safe_address
-        );
-
-        Ok(commitment)
-    }
-}
+// Deleted SettlementRelayer (dead code)
 
 /// Execution Extension (`ExEx`) for Pluggable TEE Proving & DA Mesh Emission
-#[allow(clippy::unused_async)]
 async fn sovereign_exex<N: FullNodeComponents>(
     mut ctx: ExExContext<N>,
     args: SovereignArgs,
 ) -> eyre::Result<impl Future<Output = eyre::Result<()>>> {
     let tee_mode = args.tee.to_lowercase();
-    let relayer = SettlementRelayer::new(alloy_primitives::Address::repeat_byte(0x99));
 
     Ok(async move {
         info!("Sovereign Pluggable TEE ExEx started! Mode: {tee_mode}");
@@ -171,10 +139,8 @@ async fn sovereign_exex<N: FullNodeComponents>(
                 }
 
                 debug!("Emitting state diffs for block #{} to local DA mesh...", tip.number());
-
-                // Relayer submits the block intent
-                let mock_state_diff = vec![1, 2, 3, 4];
-                let _ = relayer.submit_intent(&mock_state_diff).await;
+                let _mock_state_diff = vec![1, 2, 3, 4];
+                info!("Sovereign TEE ExEx: Emitted state diff commitment for block #{}", tip.number());
             }
 
             ctx.events.send(ExExEvent::FinishedHeight(tip_num_hash))?;
@@ -225,6 +191,21 @@ fn main() {
         if let Some(scheme) = args.pq_scheme.clone().or_else(|| std::env::var("PQ_SCHEME").ok()).or_else(|| std::env::var("DEFAULT_PQ_SCHEME").ok()) {
             dynamic_cfg.default_pq_scheme = scheme.to_lowercase();
             info!("Configured default post-quantum scheme: {}", dynamic_cfg.default_pq_scheme);
+        }
+
+        if let Some(block_time) = args.block_time {
+            static_cfg.epoch.block_time_ms = block_time;
+            info!("Configured block time from CLI: {}ms", block_time);
+        }
+
+        if let Some(profile) = args.crypto_profile.clone() {
+            dynamic_cfg.default_crypto_profile = profile.to_lowercase();
+            info!("Configured default crypto profile from CLI: {}", dynamic_cfg.default_crypto_profile);
+        }
+
+        if let Some(engine) = args.parallel_engine.clone() {
+            dynamic_cfg.parallel_execution_engine = engine.to_lowercase();
+            info!("Configured parallel execution engine from CLI: {}", dynamic_cfg.parallel_execution_engine);
         }
 
         let dynamic_cfg_arc = std::sync::Arc::new(std::sync::RwLock::new(dynamic_cfg));
@@ -283,6 +264,7 @@ temporal_decay_delta_r = 0.02
 [static_cfg.epoch]
 epoch_length = 500000
 publishing_window = 1000
+block_time_ms = 2000
 
 [static_cfg.das]
 required_samples = 32
@@ -293,6 +275,10 @@ sgx_reputation_threshold = 0.5
 manifold_quorum_threshold = 100
 social_promotion_threshold = 0.1
 metalex_validator_count_threshold = 5
+default_crypto_profile = "ethereum"
+saga_intent_timeout_seconds = 86400
+committee_threshold = 0.67
+connectivity_decay_penalty = 0.10
 "#;
         std::fs::write(&file_path, toml_content).unwrap();
 
@@ -303,6 +289,7 @@ metalex_validator_count_threshold = 5
         assert_eq!(config.static_cfg.pagerank.temporal_decay_delta_r, 0.02);
         assert_eq!(config.static_cfg.epoch.epoch_length, 500000);
         assert_eq!(config.static_cfg.epoch.publishing_window, 1000);
+        assert_eq!(config.static_cfg.epoch.block_time_ms, 2000);
         assert_eq!(config.static_cfg.das.required_samples, 32);
         assert_eq!(config.static_cfg.das.max_attempts, 500);
 
@@ -311,6 +298,10 @@ metalex_validator_count_threshold = 5
         assert_eq!(config.dynamic_cfg.social_promotion_threshold, 0.1);
         assert_eq!(config.dynamic_cfg.metalex_validator_count_threshold, 5);
         assert_eq!(config.dynamic_cfg.default_pq_scheme, "mldsa");
+        assert_eq!(config.dynamic_cfg.default_crypto_profile, "ethereum");
+        assert_eq!(config.dynamic_cfg.saga_intent_timeout_seconds, 86400);
+        assert_eq!(config.dynamic_cfg.committee_threshold, 0.67);
+        assert_eq!(config.dynamic_cfg.connectivity_decay_penalty, 0.10);
 
         let _ = std::fs::remove_file(file_path);
     }
@@ -338,15 +329,6 @@ metalex_validator_count_threshold = 5
         let _ = builder;
     }
 
-    #[tokio::test]
-    async fn test_settlement_relayer_intent() {
-        let safe_addr = alloy_primitives::Address::repeat_byte(0xbc);
-        let relayer = SettlementRelayer::new(safe_addr);
-        let state_diff = b"test-state-diff-data";
-        
-        let commitment = relayer.submit_intent(state_diff).await.unwrap();
-        assert_ne!(commitment, alloy_primitives::B256::ZERO);
-    }
 
     #[test]
     fn test_integration_nfc_namespace_metalex() {

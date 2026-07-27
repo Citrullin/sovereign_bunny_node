@@ -259,11 +259,11 @@ mod tests {
         // 3. Customer on AS 65001 emits a programmable bandwidth SLA intent:
         //    "Allocate 1 Gbps dedicated routing bandwidth across 7 hops to AS 65007 for 3600s."
         let sla_intent_payload = b"PIED_PIPER_SLA: 1Gbps / 3600s / 500 EURe / target AS 65007".to_vec();
-        let packet = BasedMeshPacket::new(
+        let packet = BasedMeshPacket::new_with_valid_binding(
             65001,
             vec![65002, 65003, 65004, 65005, 65006, 65007],
             B256::repeat_byte(0x77),
-            ProofScheme::SpruceSp1Bls12381,
+            ProofScheme::Groth16Bn254,
             b"PIED_PIPER_7_HOP_RECURSIVE_VALIDITY_PROOF".to_vec(),
             sla_intent_payload,
         );
@@ -286,8 +286,9 @@ mod tests {
             // O(1) verification: no interactive HTLC lock sagas required
             assert!(
                 received_packet.verify_validity_proof().is_ok(),
-                "Pied Piper ZK validity proof failed verification at Hop {}",
-                i
+                "Pied Piper ZK validity proof failed verification at Hop {}: {:?}",
+                i,
+                received_packet.verify_validity_proof()
             );
 
             // Programmatic hardware & BGP table reconfiguration upon proof success

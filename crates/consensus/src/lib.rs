@@ -25,6 +25,10 @@ pub mod precompile;
 pub mod slashing;
 /// Parallel execution stubs.
 pub mod parallel;
+/// Stateless reanchoring engine.
+pub mod reanchor;
+/// SALT flat state KV store.
+pub mod flat_state;
 /// Snow-based subset election.
 pub mod subset_election;
 

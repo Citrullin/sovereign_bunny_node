@@ -6,10 +6,10 @@ use sovereign_attestation::AttestationProvider;
 pub const CROSS_MANIFOLD_PRECOMPILE_ADDRESS: Address = Address::repeat_byte(0xff);
 
 /// Cross-Manifold Precompile (`0xff`) for `REMOTESTATICCALL`.
-/// Intercepts solcore namespaces and checks Gnosis Safe State Locks & Organic Routing Registry Quorum.
+/// Intercepts Solcore namespaces and checks the Organic Routing Registry Quorum.
 ///
 /// # Errors
-/// Returns an error if the input layout is invalid, state lock is expired, or routing quorum is insufficient.
+/// Returns an error if the input layout is invalid, intent TTL is expired, or routing quorum is insufficient.
 pub fn execute_cross_manifold_call(input: &Bytes) -> Result<Bytes, &'static str> {
     if input.len() < 132 {
         return Err("Input too short");
@@ -20,14 +20,12 @@ pub fn execute_cross_manifold_call(input: &Bytes) -> Result<Bytes, &'static str>
         input[32..40].try_into().map_err(|_| "Invalid manifold ID bytes")?,
     );
     let _intent_hash = &input[40..72];
-    let _ = Address::from_slice(&input[72..92]); // safe_address
-    let _ = &input[92..124]; // amount
+    // Skip 20 bytes representing destination/recipient address
+    let _amount = &input[92..124];
     let ttl = u64::from_be_bytes(input[124..132].try_into().map_err(|_| "Invalid TTL bytes")?);
 
-    // Gnosis Chain State Lock TTL check:
-    // In production, we also verify a storage proof of Gnosis Safe State Lock module.
     if ttl == 0 {
-        return Err("State Lock TTL has expired or is invalid");
+        return Err("Intent TTL has expired or is invalid");
     }
 
     // Check Organic Routing Registry Quorum
@@ -425,11 +423,11 @@ mod tests {
     #[test]
     fn test_verify_based_mesh_validity_proof_precompile() {
         use alloy_primitives::B256;
-        let packet = crate::based_mesh::BasedMeshPacket::new(
+        let packet = crate::based_mesh::BasedMeshPacket::new_with_valid_binding(
             65001,
             vec![65002],
             B256::ZERO,
-            crate::based_mesh::ProofScheme::SpruceSp1Bls12381,
+            crate::based_mesh::ProofScheme::Groth16Bn254,
             vec![0xbb; 100],
             b"exec_payload".to_vec(),
         );

@@ -11,5 +11,9 @@ siwe = { workspace = true }
 k256 = { workspace = true }
 ed25519-dalek = { workspace = true }
 tokio = { workspace = true }
+sovereign-crypto = { path = "../crypto" }
+
+[dev-dependencies]
+fips204 = { workspace = true }
 
 

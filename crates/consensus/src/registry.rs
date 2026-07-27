@@ -209,22 +209,28 @@ impl ValidatorRegistry {
         let len = bytes.len().min(32);
         wg_key[..len].copy_from_slice(&bytes[..len]);
 
-        // Derive EVM Address
+        // Derive EVM Address using profile-aware hash scheme
         let addr = match resolved.key_type {
             sovereign_identity::KeyType::Secp256k1 => {
                 let pk = k256::PublicKey::from_sec1_bytes(&resolved.public_key)
                     .map_err(|_| "Failed to parse public key bytes")?;
                 let uncompressed = pk.to_sec1_point(false);
-                let hash = alloy_primitives::keccak256(&uncompressed.as_bytes()[1..]);
-                Address::from_slice(&hash[12..32])
+                let hash = crate::crypto::hash(crate::crypto::HashScheme::Keccak256, &uncompressed.as_bytes()[1..]);
+                let mut derived = [0u8; 20];
+                derived.copy_from_slice(&hash[12..32]);
+                Address::from(derived)
             }
-            sovereign_identity::KeyType::Ed25519 |
-            sovereign_identity::KeyType::MlDsa |
-            sovereign_identity::KeyType::SlhDsa |
+            sovereign_identity::KeyType::Ed25519 => {
+                Address::from(crate::crypto::derive_address(crate::crypto::HashScheme::Blake3, &resolved.public_key))
+            }
+            sovereign_identity::KeyType::MlDsa => {
+                Address::from(crate::crypto::derive_address(crate::crypto::HashScheme::Poseidon, &resolved.public_key))
+            }
+            sovereign_identity::KeyType::SlhDsa => {
+                Address::from(crate::crypto::derive_address(crate::crypto::HashScheme::Sha256, &resolved.public_key))
+            }
             sovereign_identity::KeyType::Falcon => {
-                // For other algorithms, hash public key bytes directly to produce EVM Address
-                let hash = alloy_primitives::keccak256(&resolved.public_key);
-                Address::from_slice(&hash[12..32])
+                Address::from(crate::crypto::derive_address(crate::crypto::HashScheme::Keccak256, &resolved.public_key))
             }
         };
 
@@ -405,8 +411,9 @@ impl ValidatorRegistry {
             }
             let paths = Self::max_node_disjoint_paths(&self.seeds, node, &graph);
             if paths <= 2 {
+                let decay_penalty = self.dynamic_cfg.read().unwrap().connectivity_decay_penalty;
                 if let Some(score) = pr.get_mut(node) {
-                    *score *= 0.90; // 10% penalty
+                    *score *= 1.0 - decay_penalty;
                 }
             }
         }

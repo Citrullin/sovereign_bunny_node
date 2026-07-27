@@ -3411,6 +3411,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
+name = "fips204"
+version = "0.4.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c9fb5a367b9846933e271a3c2a992930743f82ae5e8cb7faa780715a80fa0b15"
+dependencies = [
+ "rand_core 0.6.4",
+ "sha2 0.10.9",
+ "sha3 0.10.9",
+ "zeroize",
+]
+
+[[package]]
+name = "fips205"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2f5626bf5534df4ebdbd2536465d7eaa8a9dc2cdeb7e036e0ecf291dcc80ffb6"
+dependencies = [
+ "rand_core 0.6.4",
+ "sha2 0.10.9",
+ "sha3 0.10.9",
+ "zeroize",
+]
+
+[[package]]
 name = "fixed-cache"
 version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5123,6 +5147,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "light-poseidon"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "47a1ccadd0bb5a32c196da536fd72c59183de24a055f6bf0513bf845fefab862"
+dependencies = [
+ "ark-bn254",
+ "ark-ff 0.5.0",
+ "num-bigint",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "line-clipping"
 version = "0.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6324,6 +6360,37 @@ checksum = "85eae3c4ed2f50dcfe72643da4befc30deadb458a9b590d720cde2f2b1e97da9"
 dependencies = [
  "zerocopy",
 ]
+
+[[package]]
+name = "pqcrypto-falcon"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "01a0e72acca23e8bc9886f26396adbc1a2c71fc0b841723415ee245cdc5b395c"
+dependencies = [
+ "cc",
+ "glob",
+ "libc",
+ "pqcrypto-internals",
+ "pqcrypto-traits",
+]
+
+[[package]]
+name = "pqcrypto-internals"
+version = "0.2.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4a326caf27cbf2ac291ca7fd56300497ba9e76a8cc6a7d95b7a18b57f22b61d"
+dependencies = [
+ "cc",
+ "dunce",
+ "getrandom 0.3.4",
+ "libc",
+]
+
+[[package]]
+name = "pqcrypto-traits"
+version = "0.3.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "94e851c7654eed9e68d7d27164c454961a616cf8c203d500607ef22c737b51bb"
 
 [[package]]
 name = "prefix-trie"
@@ -10860,6 +10927,7 @@ dependencies = [
  "did-peer",
  "ed25519-dalek 3.0.0",
  "eyre",
+ "fips204",
  "futures",
  "k256 0.14.0",
  "nmt-rs",
@@ -10879,9 +10947,30 @@ dependencies = [
  "serde_json",
  "serial_test",
  "sovereign-attestation",
+ "sovereign-crypto",
  "sovereign-identity",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "sovereign-crypto"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "ark-bn254",
+ "ark-ff 0.5.0",
+ "blake3",
+ "ed25519-dalek 3.0.0",
+ "fips204",
+ "fips205",
+ "k256 0.14.0",
+ "light-poseidon",
+ "pqcrypto-falcon",
+ "pqcrypto-traits",
+ "serde",
+ "serde_json",
+ "tiny-keccak",
 ]
 
 [[package]]
@@ -10891,8 +10980,10 @@ dependencies = [
  "alloy-primitives",
  "did-peer",
  "ed25519-dalek 3.0.0",
+ "fips204",
  "k256 0.14.0",
  "siwe",
+ "sovereign-crypto",
  "tokio",
 ]
 

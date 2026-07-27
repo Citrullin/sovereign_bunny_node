@@ -5,6 +5,7 @@ members = [
     "crates/attestation",
     "crates/identity",
     "crates/network",
+    "crates/crypto",
 ]
 resolver = "2"
 
@@ -62,6 +63,15 @@ toml = "0.8"
 scale = { package = "parity-scale-codec", version = "3.6", default-features = false }
 base64 = "0.22"
 bs58 = "0.5"
+blake3 = "1.5"
+fips204 = "0.4"
+fips205 = "0.4"
+pqcrypto-falcon = "0.4"
+pqcrypto-traits = "0.3.5"
+light-poseidon = "0.4.0"
+ark-bn254 = "0.5.0"
+ark-ff = "0.5.0"
+
 
 
 
@@ -70,6 +80,7 @@ sovereign-consensus = { path = "crates/consensus" }
 sovereign-attestation = { path = "crates/attestation" }
 sovereign-identity = { path = "crates/identity" }
 sovereign-network = { path = "crates/network" }
+sovereign-crypto = { path = "crates/crypto" }
 
 [profile.dev]
 debug = 0

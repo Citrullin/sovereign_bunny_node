@@ -52,6 +52,8 @@ pub struct EpochConfig {
     pub epoch_length: u64,
     /// Publishing window length in blocks (e.g., 300).
     pub publishing_window: u64,
+    /// Target block time in milliseconds (e.g. 2000 for 2s).
+    pub block_time_ms: u64,
 }
 
 impl Default for EpochConfig {
@@ -59,6 +61,7 @@ impl Default for EpochConfig {
         Self {
             epoch_length: 1_296_000,
             publishing_window: 300,
+            block_time_ms: 2000,
         }
     }
 }
@@ -98,6 +101,21 @@ pub struct DynamicConfig {
     /// Default post-quantum signature scheme mandated when Zero Latency Quantum Trigger is active (e.g. "mldsa", "slhdsa", "falcon").
     #[serde(alias = "pq_scheme", default = "default_pq_scheme")]
     pub default_pq_scheme: String,
+    /// Default cryptographic profile (e.g. "ethereum", "throughput", "quantum_standard").
+    pub default_crypto_profile: String,
+    /// Saga intent validity window / timeout in seconds (e.g., 86400).
+    pub saga_intent_timeout_seconds: u64,
+    /// Threshold to reach orchestrator quorum for a Saga Intent (e.g. 0.67).
+    pub committee_threshold: f64,
+    /// Decay penalty applied to offline orchestrators (e.g. 0.10).
+    pub connectivity_decay_penalty: f64,
+    /// Pluggable parallel EVM execution engine selection (e.g. "wave", "pevm", "grevm").
+    #[serde(default = "default_parallel_engine")]
+    pub parallel_execution_engine: String,
+}
+
+fn default_parallel_engine() -> String {
+    "wave".to_string()
 }
 
 fn default_pq_scheme() -> String {
@@ -113,6 +131,11 @@ impl Default for DynamicConfig {
             metalex_validator_count_threshold: 2,
             zero_latency_quantum_trigger: false,
             default_pq_scheme: default_pq_scheme(),
+            default_crypto_profile: "ethereum".to_string(),
+            saga_intent_timeout_seconds: 86400,
+            committee_threshold: 0.67,
+            connectivity_decay_penalty: 0.10,
+            parallel_execution_engine: "wave".to_string(),
         }
     }
 }

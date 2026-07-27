@@ -31,8 +31,11 @@ k256 = { workspace = true }
 ed25519-dalek = { workspace = true }
 sovereign-attestation = { path = "../attestation" }
 sovereign-identity = { path = "../identity" }
+sovereign-crypto = { path = "../crypto" }
 did-peer = { workspace = true }
 bs58 = { workspace = true }
+fips204 = { workspace = true }
+
 c-kzg = "2.1.8"
 serde = { workspace = true }
 serde_json = { workspace = true }

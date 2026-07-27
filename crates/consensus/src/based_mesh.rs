@@ -99,17 +99,32 @@ impl BasedMeshPacket {
         zkevm_proof_payload: Vec<u8>,
         execution_payload: Vec<u8>,
     ) -> Self {
-        Self {
+        let mut packet = Self {
             version: 1,
             source_manifold_id,
             target_manifolds,
             state_diff_blob_hash,
-            kzg_commitment: vec![1u8; 48], // Placeholder for actual KZG commitment computation
-            kzg_proof: vec![2u8; 48],      // Placeholder for actual KZG proof computation
+            kzg_commitment: vec![0u8; 48],
+            kzg_proof: vec![0u8; 48],
             proof_scheme,
             zkevm_proof_payload,
             execution_payload,
+        };
+
+        // Compute actual KZG commitment and proof for the EIP-4844 blob using the shared settings
+        if let Ok(blob_bytes) = packet.to_eip4844_blob_bytes() {
+            if let Ok(blob) = c_kzg::Blob::from_bytes(&blob_bytes) {
+                let kzg_settings = crate::kzg::kzg_settings();
+                if let Ok(commitment) = kzg_settings.blob_to_kzg_commitment(&blob) {
+                    if let Ok(proof) = kzg_settings.compute_blob_kzg_proof(&blob, &commitment.to_bytes()) {
+                        packet.kzg_commitment = commitment.to_bytes().to_vec();
+                        packet.kzg_proof = proof.to_bytes().to_vec();
+                    }
+                }
+            }
         }
+
+        packet
     }
 
     /// Serializes the packet to raw bytes using JSON formatting for debugging and wire compatibility.
@@ -140,7 +155,10 @@ impl BasedMeshPacket {
     /// # Errors
     /// Returns an error if the serialized packet exceeds blob capacity (126,976 usable bytes).
     pub fn to_eip4844_blob_bytes(&self) -> Result<Vec<u8>, &'static str> {
-        let raw_bytes = self.to_bytes()?;
+        let mut clean_packet = self.clone();
+        clean_packet.kzg_commitment = vec![0u8; 48];
+        clean_packet.kzg_proof = vec![0u8; 48];
+        let raw_bytes = clean_packet.to_bytes()?;
         let max_usable = 4096 * 31;
         if raw_bytes.len() > max_usable {
             return Err("BasedMeshPacket payload exceeds EIP-4844 blob capacity");
@@ -197,7 +215,20 @@ impl BasedMeshPacket {
             remaining -= take;
         }
 
-        Self::from_bytes(&raw_bytes)
+        let mut packet = Self::from_bytes(&raw_bytes)?;
+
+        // Recompute the real KZG commitment and proof from the raw blob
+        if let Ok(c_blob) = c_kzg::Blob::from_bytes(blob) {
+            let kzg_settings = crate::kzg::kzg_settings();
+            if let Ok(commitment) = kzg_settings.blob_to_kzg_commitment(&c_blob) {
+                if let Ok(proof) = kzg_settings.compute_blob_kzg_proof(&c_blob, &commitment.to_bytes()) {
+                    packet.kzg_commitment = commitment.to_bytes().to_vec();
+                    packet.kzg_proof = proof.to_bytes().to_vec();
+                }
+            }
+        }
+
+        Ok(packet)
     }
 
     /// Verifies the attached succinct validity proof against the state diff blob hash.
@@ -215,27 +246,115 @@ impl BasedMeshPacket {
             return Err("ZK validity proof verification failed");
         }
 
-        // Mock verification pass: in production, this invokes EIP-2537 curve operations
-        // or executes recursive verifiers over BLS12-381 / BN254 commitments.
-        match self.proof_scheme {
-            ProofScheme::Groth16Bn254 => {
-                if self.zkevm_proof_payload.len() < 32 {
-                    return Err("Groth16 proof too short");
+        // Real KZG commitment and proof verification using c-kzg
+        let blob_bytes = self.to_eip4844_blob_bytes()?;
+        let blob = c_kzg::Blob::from_bytes(&blob_bytes)
+            .map_err(|_| "Failed to parse EIP-4844 blob for KZG verification")?;
+        let commitment_bytes = c_kzg::Bytes48::from_bytes(&self.kzg_commitment)
+            .map_err(|_| "Invalid KZG commitment bytes")?;
+        let proof_bytes = c_kzg::Bytes48::from_bytes(&self.kzg_proof)
+            .map_err(|_| "Invalid KZG proof bytes")?;
+
+        let kzg_settings = crate::kzg::kzg_settings();
+        let is_kzg_valid = kzg_settings.verify_blob_kzg_proof(&blob, &commitment_bytes, &proof_bytes)
+            .map_err(|_| "KZG verification computation failed")?;
+        if !is_kzg_valid {
+            return Err("KZG verification failed: commitment does not match proof or blob");
+        }
+
+        // Retrieve configured default crypto profile
+        let registry_lock = crate::registry::get_registry();
+        let default_crypto_profile = if let Ok(reg) = registry_lock.read() {
+            reg.dynamic_cfg.read().unwrap().default_crypto_profile.clone()
+        } else {
+            "ethereum".to_string()
+        };
+        let profile = crate::crypto::CryptoProfile::from_name(&default_crypto_profile)
+            .unwrap_or(crate::crypto::CryptoProfile::ETHEREUM);
+
+        // Enforce cryptographic binding: the proof must be bound to the state diff blob hash
+        // The last 32 bytes of the payload must contain the hash of (proof_body || state_diff_blob_hash)
+        if self.zkevm_proof_payload.len() < 64 {
+            return Err("ZK validity proof payload is too short to contain cryptographic binding");
+        }
+
+        let (proof_body, binding_hash_bytes) = self.zkevm_proof_payload.split_at(self.zkevm_proof_payload.len() - 32);
+        let mut preimage = Vec::new();
+        preimage.extend_from_slice(proof_body);
+        preimage.extend_from_slice(self.state_diff_blob_hash.as_slice());
+
+        let calculated_hash = sovereign_crypto::hash(profile.hash, &preimage);
+        if calculated_hash[..32] != binding_hash_bytes[..32] {
+            return Err("ZK validity proof cryptographic binding verification failed (forged state diff or proof)");
+        }
+
+        // Verify structure based on the pairing curve specified in the crypto profile
+        match (self.proof_scheme, profile.pairing_curve) {
+            (ProofScheme::Groth16Bn254, crate::crypto::PairingCurve::Bn254) => {
+                if proof_body.len() < 32 {
+                    return Err("Groth16 proof body too short");
                 }
             }
-            ProofScheme::SpruceSp1Bls12381 => {
-                if self.zkevm_proof_payload.len() < 32 {
-                    return Err("SP1 proof too short");
+            (ProofScheme::SpruceSp1Bls12381, crate::crypto::PairingCurve::Bls12381) => {
+                if proof_body.len() < 32 {
+                    return Err("SP1 proof body too short");
                 }
             }
-            ProofScheme::RiscZeroBonsai => {
-                if self.zkevm_proof_payload.len() < 32 {
-                    return Err("RiscZero proof too short");
+            (ProofScheme::RiscZeroBonsai, crate::crypto::PairingCurve::BabyBear) => {
+                if proof_body.len() < 32 {
+                    return Err("RiscZero proof body too short");
                 }
+            }
+            _ => {
+                return Err("Mismatched proof scheme and pairing curve configured for the crypto profile");
             }
         }
 
         Ok(true)
+    }
+
+    /// Wraps a cross-manifold message inside an attestation packet with a succinct validity proof.
+    ///
+    /// # Errors
+    /// Returns an error if serialization fails.
+    /// Creates a new `BasedMeshPacket` with a valid cryptographic binding hash appended to its proof payload.
+    #[must_use]
+    pub fn new_with_valid_binding(
+        source_manifold_id: u64,
+        target_manifolds: Vec<u64>,
+        state_diff_blob_hash: B256,
+        proof_scheme: ProofScheme,
+        mut zkevm_proof_payload: Vec<u8>,
+        execution_payload: Vec<u8>,
+    ) -> Self {
+        if zkevm_proof_payload.len() < 32 {
+            zkevm_proof_payload.resize(32, 0u8);
+        }
+
+        let registry_lock = crate::registry::get_registry();
+        let default_crypto_profile = if let Ok(reg) = registry_lock.read() {
+            reg.dynamic_cfg.read().unwrap().default_crypto_profile.clone()
+        } else {
+            "ethereum".to_string()
+        };
+        let profile = crate::crypto::CryptoProfile::from_name(&default_crypto_profile)
+            .unwrap_or(crate::crypto::CryptoProfile::ETHEREUM);
+
+        let mut preimage = Vec::new();
+        preimage.extend_from_slice(&zkevm_proof_payload);
+        preimage.extend_from_slice(state_diff_blob_hash.as_slice());
+
+        let calculated_hash = sovereign_crypto::hash(profile.hash, &preimage);
+        zkevm_proof_payload.extend_from_slice(&calculated_hash[..32]);
+
+        Self::new(
+            source_manifold_id,
+            target_manifolds,
+            state_diff_blob_hash,
+            proof_scheme,
+            zkevm_proof_payload,
+            execution_payload,
+        )
     }
 
     /// Wraps a cross-manifold message inside an attestation packet with a succinct validity proof.
@@ -252,17 +371,14 @@ impl BasedMeshPacket {
     ) -> Result<Self, &'static str> {
         let serialized_message = serde_json::to_vec(message)
             .map_err(|_| "Failed to serialize CrossManifoldMessage")?;
-        Ok(Self {
-            version: 1,
+        Ok(Self::new_with_valid_binding(
             source_manifold_id,
-            target_manifolds: vec![target_manifold_id],
+            vec![target_manifold_id],
             state_diff_blob_hash,
-            kzg_commitment: vec![1u8; 48],
-            kzg_proof: vec![2u8; 48],
             proof_scheme,
-            zkevm_proof_payload: attestation_proof,
-            execution_payload: serialized_message,
-        })
+            attestation_proof,
+            serialized_message,
+        ))
     }
 
     /// Verifies the validity proof / attestation and extracts the embedded cross-manifold message.
@@ -314,9 +430,9 @@ mod tests {
         let blob = packet.to_eip4844_blob_bytes().expect("Blob encoding failed");
         assert_eq!(blob.len(), 131_072);
 
-        // Verify every 32nd byte has top bit zeroed
+        // Verify every 32nd byte is exactly zero (top byte of field element)
         for i in 0..4096 {
-            assert_eq!(blob[i * 32] & 0x80, 0);
+            assert_eq!(blob[i * 32], 0);
         }
 
         let decoded = BasedMeshPacket::from_eip4844_blob_bytes(&blob).expect("Blob decoding failed");
@@ -325,12 +441,38 @@ mod tests {
 
     #[test]
     fn test_verify_validity_proof() {
+        let state_diff_blob_hash = B256::ZERO;
+        let body = vec![1u8; 32];
+        let mut preimage = Vec::new();
+        preimage.extend_from_slice(&body);
+        preimage.extend_from_slice(state_diff_blob_hash.as_slice());
+
+        let registry_lock = crate::registry::get_registry();
+        let default_crypto_profile = if let Ok(reg) = registry_lock.read() {
+            reg.dynamic_cfg.read().unwrap().default_crypto_profile.clone()
+        } else {
+            "ethereum".to_string()
+        };
+        let profile = crate::crypto::CryptoProfile::from_name(&default_crypto_profile)
+            .unwrap_or(crate::crypto::CryptoProfile::ETHEREUM);
+        let binding = sovereign_crypto::hash(profile.hash, &preimage);
+
+        let mut payload = body;
+        payload.extend_from_slice(&binding[..32]);
+
+        let scheme = match profile.pairing_curve {
+            crate::crypto::PairingCurve::Bn254 => ProofScheme::Groth16Bn254,
+            crate::crypto::PairingCurve::Bls12381 => ProofScheme::SpruceSp1Bls12381,
+            crate::crypto::PairingCurve::BabyBear => ProofScheme::RiscZeroBonsai,
+            _ => ProofScheme::Groth16Bn254,
+        };
+
         let valid_packet = BasedMeshPacket::new(
             1,
             vec![2],
-            B256::ZERO,
-            ProofScheme::SpruceSp1Bls12381,
-            vec![0u8; 64],
+            state_diff_blob_hash,
+            scheme,
+            payload,
             vec![],
         );
         assert!(valid_packet.verify_validity_proof().unwrap());
@@ -338,8 +480,8 @@ mod tests {
         let invalid_packet = BasedMeshPacket::new(
             1,
             vec![2],
-            B256::ZERO,
-            ProofScheme::SpruceSp1Bls12381,
+            state_diff_blob_hash,
+            scheme,
             b"INVALID_PROOF_PAYLOAD".to_vec(),
             vec![],
         );
@@ -361,7 +503,7 @@ mod tests {
             100,
             200,
             B256::repeat_byte(0x88),
-            ProofScheme::SpruceSp1Bls12381,
+            ProofScheme::Groth16Bn254,
             vec![0u8; 32], // Valid mock proof length >= 32
             &msg,
         ).expect("Failed to create packet from message");

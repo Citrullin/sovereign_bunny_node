@@ -32,6 +32,18 @@ impl KeyType {
     }
 }
 
+impl From<KeyType> for sovereign_crypto::SignatureScheme {
+    fn from(kt: KeyType) -> Self {
+        match kt {
+            KeyType::Ed25519 => sovereign_crypto::SignatureScheme::Ed25519,
+            KeyType::Secp256k1 => sovereign_crypto::SignatureScheme::Secp256k1,
+            KeyType::MlDsa => sovereign_crypto::SignatureScheme::MlDsa,
+            KeyType::SlhDsa => sovereign_crypto::SignatureScheme::SlhDsa,
+            KeyType::Falcon => sovereign_crypto::SignatureScheme::Falcon,
+        }
+    }
+}
+
 /// A struct representing a resolved DID Peer 4 identifier.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DidPeer4 {
@@ -96,41 +108,13 @@ impl DidPeer4 {
     /// # Errors
     /// Returns an error if signature verification fails or if traditional keys are used when `quantum_threat` is true.
     pub fn verify_signature(&self, message: &[u8], signature: &[u8], quantum_threat: bool) -> Result<(), &'static str> {
-        if quantum_threat && !self.key_type.is_post_quantum() {
-            return Err("ECDSA and EdDSA signature schemes are rejected due to active quantum threat (Zero Latency Quantum Trigger active)");
-        }
-
-        match self.key_type {
-            KeyType::Secp256k1 => {
-                use k256::ecdsa::signature::Verifier;
-                let verifying_key = k256::ecdsa::VerifyingKey::from_sec1_bytes(&self.public_key)
-                    .map_err(|_| "Invalid Secp256k1 public key")?;
-                let sig = k256::ecdsa::Signature::from_slice(signature)
-                    .map_err(|_| "Invalid Secp256k1 signature")?;
-                verifying_key.verify(message, &sig)
-                    .map_err(|_| "Secp256k1 signature verification failed")?;
-            }
-            KeyType::Ed25519 => {
-                use ed25519_dalek::{Verifier, VerifyingKey, Signature};
-                let key_bytes: &[u8; 32] = self.public_key[0..32].try_into()
-                    .map_err(|_| "Invalid Ed25519 public key length")?;
-                let verifying_key = VerifyingKey::from_bytes(key_bytes)
-                    .map_err(|_| "Invalid Ed25519 public key")?;
-                let sig = Signature::from_slice(signature)
-                    .map_err(|_| "Invalid Ed25519 signature")?;
-                verifying_key.verify(message, &sig)
-                    .map_err(|_| "Ed25519 signature verification failed")?;
-            }
-            KeyType::MlDsa | KeyType::SlhDsa | KeyType::Falcon => {
-                if signature.is_empty() {
-                    return Err("Empty post-quantum signature");
-                }
-                if signature == b"INVALID_PQ_SIGNATURE" {
-                    return Err("Post-quantum signature verification failed");
-                }
-            }
-        }
-        Ok(())
+        sovereign_crypto::verify_signature(
+            self.key_type.into(),
+            &self.public_key,
+            message,
+            signature,
+            quantum_threat,
+        )
     }
 }
 
@@ -308,6 +292,11 @@ mod tests {
         let sig: k256::ecdsa::Signature = secp_signing_key.sign(msg);
         let sig_bytes = sig.to_bytes();
 
+        use fips204::traits::{KeyGen, SerDes, Signer as FipsSigner};
+        let (pk_struct, sk_struct) = fips204::ml_dsa_65::KG::try_keygen().unwrap();
+        let pk_bytes = pk_struct.into_bytes();
+        let mldsa_sig = FipsSigner::try_sign(&sk_struct, msg, &[]).unwrap();
+
         let secp_peer = DidPeer4 {
             did: "did:peer:4:zQ3s".to_string(),
             key_type: KeyType::Secp256k1,
@@ -317,18 +306,18 @@ mod tests {
         let mldsa_peer = DidPeer4 {
             did: "did:peer:4:zDilithium".to_string(),
             key_type: KeyType::MlDsa,
-            public_key: vec![0u8; 1312],
+            public_key: pk_bytes.to_vec(),
         };
 
         // Enforced == false: secp should succeed, ML-DSA should succeed
         assert!(secp_peer.verify_signature(msg, &sig_bytes, false).is_ok());
-        assert!(mldsa_peer.verify_signature(msg, b"valid_pq_signature", false).is_ok());
+        assert!(mldsa_peer.verify_signature(msg, &mldsa_sig, false).is_ok());
 
         // Enforced == true: secp (traditional) must fail, ML-DSA (PQ) must succeed
         let res_secp = secp_peer.verify_signature(msg, &sig_bytes, true);
         assert!(res_secp.is_err());
         assert_eq!(res_secp.unwrap_err(), "ECDSA and EdDSA signature schemes are rejected due to active quantum threat (Zero Latency Quantum Trigger active)");
         
-        assert!(mldsa_peer.verify_signature(msg, b"valid_pq_signature", true).is_ok());
+        assert!(mldsa_peer.verify_signature(msg, &mldsa_sig, true).is_ok());
     }
 }

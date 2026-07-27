@@ -1,5 +1,5 @@
-//! Cross-Manifold Actor System (Distributed Saga Rollback Pattern).
-//! Handles multi-manifold transaction state machines: LOCK_ASSETS -> PREPARE_EXECUTION -> COMMIT / ROLLBACK.
+//! Cross-Manifold Actor System (Distributed Saga Intent Pattern).
+//! Handles multi-manifold transaction state machines: INITIATE_INTENT -> PREPARE_EXECUTION -> COMMIT / ROLLBACK.
 
 use alloy_primitives::{Address, B256, U256};
 use serde::{Deserialize, Serialize};
@@ -7,13 +7,13 @@ use serde::{Deserialize, Serialize};
 /// Discrete execution states for a Cross-Manifold Transaction Actor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ActorState {
-    /// Assets locked in source escrow contract with a 1-day time-lock.
-    LockAssets,
+    /// Cross-chain intent initiated.
+    InitiateIntent,
     /// Target manifold preparing execution and checking attestation.
     PrepareExecution,
-    /// Transaction committed successfully; escrow released.
+    /// Transaction committed successfully.
     Commit,
-    /// Execution failed or timed out; escrow unlocked back to sender.
+    /// Execution failed or timed out; intent rolled back.
     Rollback,
 }
 
@@ -28,25 +28,32 @@ pub struct CrossManifoldActor {
     pub sender: Address,
     /// Target manifold address.
     pub recipient: Address,
-    /// Locked token amount.
+    /// Intended token amount.
     pub amount: U256,
-    /// Lock creation timestamp.
+    /// Intent creation timestamp.
     pub created_at: u64,
-    /// Expiration window (86400 seconds = 1 day).
+    /// Expiration window in seconds.
     pub timeout_seconds: u64,
 }
 
 impl CrossManifoldActor {
-    /// Initializes a new Cross-Manifold Actor in `LOCK_ASSETS` state.
+    /// Initializes a new Cross-Manifold Actor in `InitiateIntent` state.
     pub fn new(actor_id: B256, sender: Address, recipient: Address, amount: U256, current_time: u64) -> Self {
+        let registry_lock = crate::registry::get_registry();
+        let timeout = if let Ok(reg) = registry_lock.read() {
+            reg.dynamic_cfg.read().unwrap().saga_intent_timeout_seconds
+        } else {
+            86400
+        };
+
         Self {
             actor_id,
-            state: ActorState::LockAssets,
+            state: ActorState::InitiateIntent,
             sender,
             recipient,
             amount,
             created_at: current_time,
-            timeout_seconds: 86400,
+            timeout_seconds: timeout,
         }
     }
 
@@ -55,7 +62,7 @@ impl CrossManifoldActor {
     /// # Errors
     /// Returns an error if transition is invalid.
     pub fn prepare(&mut self) -> Result<(), &'static str> {
-        if self.state != ActorState::LockAssets {
+        if self.state != ActorState::InitiateIntent {
             return Err("Invalid state transition to PrepareExecution");
         }
         self.state = ActorState::PrepareExecution;
@@ -74,14 +81,21 @@ impl CrossManifoldActor {
         Ok(())
     }
 
-    /// Triggers an automated Rollback, unlocking escrowed funds back to the sender.
+    /// Triggers an automated Rollback, reverting the intent.
     pub fn rollback(&mut self) {
         self.state = ActorState::Rollback;
     }
 
     /// Evaluates timeout conditions and auto-triggers Rollback if expired.
     pub fn evaluate_timeout(&mut self, current_time: u64) -> bool {
-        if self.state != ActorState::Commit && current_time > (self.created_at + self.timeout_seconds) {
+        let registry_lock = crate::registry::get_registry();
+        let timeout = if let Ok(reg) = registry_lock.read() {
+            reg.dynamic_cfg.read().unwrap().saga_intent_timeout_seconds
+        } else {
+            self.timeout_seconds
+        };
+
+        if self.state != ActorState::Commit && current_time > (self.created_at + timeout) {
             self.rollback();
             true
         } else {
@@ -92,7 +106,7 @@ impl CrossManifoldActor {
     /// Generates a cross-manifold attestation packet to trigger execution preparation on the target manifold.
     ///
     /// # Errors
-    /// Returns an error if the actor state is not `LockAssets` or serialization fails.
+    /// Returns an error if the actor state is not `InitiateIntent` or serialization fails.
     pub fn emit_prepare_attestation(
         &self,
         source_manifold_id: u64,
@@ -101,8 +115,8 @@ impl CrossManifoldActor {
         proof_scheme: crate::based_mesh::ProofScheme,
         attestation_proof: Vec<u8>,
     ) -> Result<crate::based_mesh::BasedMeshPacket, &'static str> {
-        if self.state != ActorState::LockAssets {
-            return Err("Cannot emit prepare attestation: actor is not in LockAssets state");
+        if self.state != ActorState::InitiateIntent {
+            return Err("Cannot emit prepare attestation: actor is not in InitiateIntent state");
         }
 
         // Encode actor state transition detail as the payload
@@ -152,7 +166,7 @@ impl CrossManifoldActor {
 
         // Advance state machine based on packet information
         match self.state {
-            ActorState::LockAssets => {
+            ActorState::InitiateIntent => {
                 self.prepare()?;
             }
             ActorState::PrepareExecution => {
@@ -200,18 +214,17 @@ mod tests {
 
         // Initialize source actor
         let source_actor = CrossManifoldActor::new(actor_id, sender, recipient, amount, current_time);
-        assert_eq!(source_actor.state, ActorState::LockAssets);
+        assert_eq!(source_actor.state, ActorState::InitiateIntent);
 
-        // Generate ZK attestation packet from source actor
         let packet = source_actor.emit_prepare_attestation(
             65001,
             65002,
             B256::ZERO,
-            ProofScheme::SpruceSp1Bls12381,
+            ProofScheme::Groth16Bn254,
             vec![0u8; 32], // Valid mock proof length >= 32
         ).unwrap();
 
-        // Initialize target actor (starts in LockAssets locally)
+        // Initialize target actor (starts in InitiateIntent locally)
         let mut target_actor = CrossManifoldActor::new(actor_id, sender, recipient, amount, current_time);
 
         // Target actor processes the packet, advancing its state

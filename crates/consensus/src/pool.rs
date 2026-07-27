@@ -28,20 +28,7 @@ pub struct FCFSOrdering<T> {
     _marker: std::marker::PhantomData<T>,
 }
 
-/// A standard ERC-7683 Cross-Chain Intent
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ERC7683Intent {
-    /// The target recipient address on the destination manifold.
-    pub target: alloy_primitives::Address,
-    /// The amount of assets to transfer.
-    pub amount: alloy_primitives::U256,
-    /// The asset/token address.
-    pub asset: alloy_primitives::Address,
-    /// The expiration deadline timestamp.
-    pub deadline: u64,
-    /// The target manifold ID.
-    pub target_manifold_id: u64,
-}
+// Deleted ERC7683Intent (dead code)
 
 /// A transaction bundled with its execution witness.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -293,8 +280,8 @@ where
             }
 
             // Verify sender matches derived address
-            let hash = alloy_primitives::keccak256(&pk);
-            let derived_addr = alloy_primitives::Address::from_slice(&hash[12..]);
+            let hash_scheme = scheme.default_address_hash();
+            let derived_addr = alloy_primitives::Address::from(crate::crypto::derive_address(hash_scheme, &pk));
             if derived_addr != transaction.sender() {
                 return TransactionValidationOutcome::Invalid(
                     transaction,
@@ -417,154 +404,63 @@ pub fn validate_witness<T: PoolTransaction>(
         return false;
     }
 
-    let registry_lock = crate::registry::get_registry();
-    let (quantum_threat, default_pq_scheme) = if let Ok(reg) = registry_lock.read() {
-        let dynamic = reg.dynamic_cfg.read().unwrap();
-        (dynamic.zero_latency_quantum_trigger, dynamic.default_pq_scheme.clone())
-    } else {
-        (false, "mldsa".to_string())
-    };
-
-    if quantum_threat {
-        // Try to unpack PQ envelope from witness
-        let Ok((scheme, pk, sig)) = crate::crypto::unpack_pq_envelope(&transaction.witness) else {
-            return false;
-        };
-
-        // Enforce PQ constraints matching default scheme
-        let configured_scheme = crate::crypto::parse_scheme(&default_pq_scheme).unwrap_or(crate::crypto::SignatureScheme::MlDsa);
-        if scheme != configured_scheme {
-            return false;
-        }
-
-        // Verify signature natively
-        let msg = transaction.transaction.hash().as_slice();
-        if crate::crypto::verify_signature(scheme, &pk, msg, &sig, true).is_err() {
-            return false;
-        }
-
-        // Verify sender address matches keccak256(public_key)[12..32]
-        let hash = alloy_primitives::keccak256(&pk);
-        let derived_addr = alloy_primitives::Address::from_slice(&hash[12..]);
-        return derived_addr == transaction.transaction.sender();
-    }
-
-    if cfg!(debug_assertions) || std::env::var("SOVEREIGN_MOCK_WITNESS").is_ok() {
+    #[cfg(test)]
+    {
         // Fallback for testing/dev
         if transaction.witness.len() >= 4 && transaction.witness[0..4] == [0xde, 0xad, 0xbe, 0xef] {
             return true;
         }
     }
 
-    // Parse the witness as a 65-byte recoverable ECDSA signature
-    let Ok(sig) = alloy_primitives::Signature::try_from(transaction.witness.as_slice()) else {
-        return false;
+    let registry_lock = crate::registry::get_registry();
+    let (quantum_threat, default_crypto_profile) = if let Ok(reg) = registry_lock.read() {
+        let dynamic = reg.dynamic_cfg.read().unwrap();
+        (dynamic.zero_latency_quantum_trigger, dynamic.default_crypto_profile.clone())
+    } else {
+        (false, "ethereum".to_string())
     };
 
-    // Recover address from signature and transaction hash
-    let hash = transaction.transaction.hash();
-    let Ok(recovered_addr) = sig.recover_address_from_prehash(&hash) else {
+    let profile = crate::crypto::CryptoProfile::from_name(&default_crypto_profile)
+        .unwrap_or(crate::crypto::CryptoProfile::ETHEREUM);
+
+    // Try to unpack PQ envelope from witness
+    if let Ok((scheme, pk, sig)) = crate::crypto::unpack_pq_envelope(&transaction.witness) {
+        if quantum_threat && !scheme.is_post_quantum() {
+            return false;
+        }
+
+        // Verify signature natively
+        let msg = transaction.transaction.hash().as_slice();
+        if crate::crypto::verify_signature(scheme, &pk, msg, &sig, quantum_threat).is_err() {
+            return false;
+        }
+
+        // Derive address using the scheme's mapping
+        let hash_scheme = scheme.default_address_hash();
+        let derived_addr = alloy_primitives::Address::from(crate::crypto::derive_address(hash_scheme, &pk));
+        return derived_addr == transaction.transaction.sender();
+    }
+
+    if quantum_threat {
+        // Enforce PQ trigger requires PQ envelopes
         return false;
-    };
-
-    // Recovered address must match the sender
-    recovered_addr == transaction.transaction.sender()
-}
-
-/// Custom validator wrapping any standard validator to enforce witness checks.
-#[derive(Debug, Clone)]
-pub struct SovereignTransactionValidator<V> {
-    inner: V,
-}
-
-impl<V> SovereignTransactionValidator<V> {
-    /// Creates a new `SovereignTransactionValidator`.
-    pub fn new(inner: V) -> Self {
-        Self { inner }
-    }
-}
-
-impl<V, T, B> TransactionValidator for SovereignTransactionValidator<V>
-where
-    V: TransactionValidator<Transaction = T, Block = B>,
-    T: PoolTransaction,
-    B: reth_ethereum::primitives::Block, // Block trait
-{
-    type Transaction = TransactionWithWitness<T>;
-    type Block = B;
-
-    async fn validate_transaction(
-        &self,
-        origin: TransactionOrigin,
-        transaction: Self::Transaction,
-    ) -> TransactionValidationOutcome<Self::Transaction> {
-        let current_state_root = B256::repeat_byte(0xaa);
-
-        // Instant validation failure if witness is missing or invalid
-        if !validate_witness(&transaction, current_state_root) {
-            return TransactionValidationOutcome::Invalid(
-                transaction,
-                InvalidTransactionError::TxTypeNotSupported.into(),
-            );
-        }
-
-        let inner_outcome = self.inner.validate_transaction(origin, transaction.transaction).await;
-        let witness = transaction.witness;
-
-        match inner_outcome {
-            TransactionValidationOutcome::Valid {
-                balance,
-                state_nonce,
-                bytecode_hash,
-                propagate,
-                authorities,
-                transaction: inner_tx,
-            } => {
-                let mapped_tx = match inner_tx {
-                    reth_transaction_pool::validate::ValidTransaction::Valid(tx) => {
-                        reth_transaction_pool::validate::ValidTransaction::Valid(
-                            TransactionWithWitness {
-                                transaction: tx,
-                                witness: witness.clone(),
-                            }
-                        )
-                    }
-                    reth_transaction_pool::validate::ValidTransaction::ValidWithSidecar { transaction, sidecar } => {
-                        reth_transaction_pool::validate::ValidTransaction::ValidWithSidecar {
-                            transaction: TransactionWithWitness {
-                                transaction,
-                                witness: witness.clone(),
-                            },
-                            sidecar,
-                        }
-                    }
-                };
-                TransactionValidationOutcome::Valid {
-                    balance,
-                    state_nonce,
-                    bytecode_hash,
-                    propagate,
-                    authorities,
-                    transaction: mapped_tx,
-                }
-            }
-            TransactionValidationOutcome::Invalid(inner_tx, error) => {
-                TransactionValidationOutcome::Invalid(
-                    TransactionWithWitness {
-                        transaction: inner_tx,
-                        witness,
-                    },
-                    error,
-                )
-            }
-            TransactionValidationOutcome::Error(tx_hash, error) => {
-                TransactionValidationOutcome::Error(tx_hash, error)
-            }
-        }
     }
 
-    fn on_new_head_block(&self, new_head: &reth_primitives_traits::SealedBlock<Self::Block>) {
-        self.inner.on_new_head_block(new_head);
+    // Traditional fallback based on default profile
+    if profile.signature == crate::crypto::SignatureScheme::Secp256k1 {
+        let Ok(sig) = alloy_primitives::Signature::try_from(transaction.witness.as_slice()) else {
+            return false;
+        };
+
+        // Recover address from signature and transaction hash
+        let hash = transaction.transaction.hash();
+        let Ok(recovered_addr) = sig.recover_address_from_prehash(&hash) else {
+            return false;
+        };
+
+        recovered_addr == transaction.transaction.sender()
+    } else {
+        false
     }
 }
 
@@ -594,6 +490,7 @@ mod tests {
     #[test]
     fn test_witness_validation() {
         use crate::crypto::{pack_pq_envelope, SignatureScheme};
+        use fips204::traits::{KeyGen, Signer, SerDes};
 
         let tx = MockTransaction::eip1559();
         let mut tx_with_witness = TransactionWithWitness {
@@ -630,16 +527,18 @@ mod tests {
             dynamic.default_pq_scheme = "mldsa".to_string();
         }
 
-        // Pack PQ envelope in witness
-        let pk = vec![1; 32];
-        let sig = vec![2; 64];
-        let env_bytes = pack_pq_envelope(SignatureScheme::MlDsa, &pk, &sig);
-
-        // Derived sender EVM address matching key
-        let hash = alloy_primitives::keccak256(&pk);
-        let derived_addr = alloy_primitives::Address::from_slice(&hash[12..]);
+        // Generate real ML-DSA key pair and signature
+        let (pk_struct, sk_struct) = fips204::ml_dsa_65::KG::try_keygen().unwrap();
+        let pk_bytes = pk_struct.into_bytes();
 
         let mut pq_tx = MockTransaction::eip1559();
+        let msg = pq_tx.hash();
+        let sig_bytes = sk_struct.try_sign(msg.as_slice(), &[]).unwrap();
+
+        let env_bytes = pack_pq_envelope(SignatureScheme::MlDsa, &pk_bytes, &sig_bytes);
+
+        // Derived sender EVM address matching key
+        let derived_addr = alloy_primitives::Address::from(crate::crypto::derive_address(crate::crypto::HashScheme::Poseidon, &pk_bytes));
         pq_tx.set_sender(derived_addr);
 
         let pq_tx_with_witness = TransactionWithWitness {
@@ -662,6 +561,7 @@ mod tests {
         use reth_transaction_pool::test_utils::MockTransaction;
         use reth_transaction_pool::noop::MockTransactionValidator;
         use crate::crypto::{pack_pq_envelope, SignatureScheme};
+        use fips204::traits::{KeyGen, Signer, SerDes};
 
         let validator = SovereignQuantumTransactionValidator::new(MockTransactionValidator::default());
         let tx = MockTransaction::eip1559();
@@ -690,17 +590,19 @@ mod tests {
         let res = validator.validate_transaction(TransactionOrigin::External, tx.clone()).await;
         assert!(matches!(res, TransactionValidationOutcome::Invalid(_, _)));
 
-        // Create a transaction with a valid PQ envelope in input calldata
-        let pk = vec![1; 32];
-        let sig = vec![2; 64];
-        let env_bytes = pack_pq_envelope(SignatureScheme::MlDsa, &pk, &sig);
+        // Generate real ML-DSA key pair and signature
+        let (pk_struct, sk_struct) = fips204::ml_dsa_65::KG::try_keygen().unwrap();
+        let pk_bytes = pk_struct.into_bytes();
+
+        let mut pq_tx = MockTransaction::eip1559();
+        let msg = pq_tx.hash();
+        let sig_bytes = sk_struct.try_sign(msg.as_slice(), &[]).unwrap();
+
+        let env_bytes = pack_pq_envelope(SignatureScheme::MlDsa, &pk_bytes, &sig_bytes);
 
         // Derive EVM address of sender matching derived key
-        let hash = alloy_primitives::keccak256(&pk);
-        let derived_addr = alloy_primitives::Address::from_slice(&hash[12..]);
+        let derived_addr = alloy_primitives::Address::from(crate::crypto::derive_address(crate::crypto::HashScheme::Poseidon, &pk_bytes));
 
-        // Reconstruct mock transaction with our envelope calldata and matching sender
-        let mut pq_tx = MockTransaction::eip1559();
         pq_tx.set_input(env_bytes.into());
         pq_tx.set_sender(derived_addr);
 
@@ -715,6 +617,7 @@ mod tests {
             dynamic.zero_latency_quantum_trigger = false;
         }
     }
+
 }
 
 

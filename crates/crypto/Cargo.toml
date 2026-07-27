@@ -1,0 +1,24 @@
+[package]
+name = "sovereign-crypto"
+version = "0.1.0"
+edition = "2021"
+authors = ["Citrullin"]
+description = "Sovereign Reth native base-layer cryptography and profiles"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+k256 = "0.14.0"
+ed25519-dalek = "3.0.0"
+tiny-keccak = { version = "2.0.2", features = ["keccak"] }
+alloy-primitives = { version = "=1.6.0", default-features = false }
+blake3 = { workspace = true }
+fips204 = { workspace = true }
+fips205 = { workspace = true }
+pqcrypto-falcon = { workspace = true }
+pqcrypto-traits = { workspace = true }
+light-poseidon = { workspace = true }
+ark-bn254 = { workspace = true }
+ark-ff = { workspace = true }
+
+
