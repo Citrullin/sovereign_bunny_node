@@ -4,6 +4,47 @@
 //! across SIWE/Authentik, `NextERP`, `NextCloud`, and physical NFC hardware,
 //! supporting `OIDC` SIWE Authentik relay mappings compatible with `SpruceID`'s `siwe-oidc`.
 
+use std::io::{Read, Write};
+
+pub(crate) fn check_live_server_active(url_str: &str) -> Result<(), &'static str> {
+    let url_clean = url_str.trim_start_matches("https://").trim_start_matches("http://");
+    let mut parts = url_clean.split('/');
+    let host_and_port = parts.next().unwrap_or(url_clean);
+    
+    let mut host_parts = host_and_port.split(':');
+    let host = host_parts.next().unwrap_or(host_and_port);
+    let port = host_parts.next().unwrap_or(if url_str.starts_with("https") { "443" } else { "80" });
+    
+    let addr = format!("{host}:{port}");
+    
+    use std::net::ToSocketAddrs;
+    let socket_addrs = addr.to_socket_addrs().map_err(|_| "Failed to resolve address")?;
+    
+    let mut last_err = "No socket addresses resolved";
+    for socket_addr in socket_addrs {
+        match std::net::TcpStream::connect_timeout(&socket_addr, std::time::Duration::from_secs(3)) {
+            Ok(mut stream) => {
+                let request = format!(
+                    "GET / HTTP/1.1\r\n\
+                     Host: {host}\r\n\
+                     User-Agent: sovereign-reth/0.1.0\r\n\
+                     Connection: close\r\n\r\n"
+                );
+                if stream.write_all(request.as_bytes()).is_ok() {
+                    let mut buffer = [0u8; 128];
+                    if stream.read(&mut buffer).is_ok() {
+                        return Ok(());
+                    }
+                }
+            }
+            Err(_) => {
+                last_err = "Connection timed out or was refused by host";
+            }
+        }
+    }
+    Err(last_err)
+}
+
 /// A structured Zero-Knowledge Proof payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ZeroKnowledgeProof {
@@ -46,6 +87,10 @@ impl IdentityProvider for AuthentikZkpAuth {
     type Credentials = String;
 
     fn verify_identity(&self, credentials: &Self::Credentials) -> Result<InternalIdentityMapping, &'static str> {
+        if std::env::var("SOVEREIGN_LIVE_IDENTITY_TESTS").unwrap_or_default() == "1" {
+            check_live_server_active(&self.identity_server)?;
+        }
+
         use std::str::FromStr;
         let parsed = siwe::Message::from_str(credentials)
             .map_err(|_| "Failed to parse SIWE message conforming to EIP-4361")?;
@@ -90,6 +135,10 @@ impl IdentityProvider for NextErpAuth {
     type Credentials = NextErpCredentials;
 
     fn verify_identity(&self, credentials: &Self::Credentials) -> Result<InternalIdentityMapping, &'static str> {
+        if std::env::var("SOVEREIGN_LIVE_IDENTITY_TESTS").unwrap_or_default() == "1" {
+            check_live_server_active(&self.relay_server)?;
+        }
+
         if credentials.user_did.is_empty() || credentials.authentik_relay_signature.is_empty() {
             return Err("Missing User DID or Authentik relay signature");
         }
@@ -139,6 +188,11 @@ impl IdentityProvider for NextCloudAuth {
     type Credentials = NextCloudCredentials;
 
     fn verify_identity(&self, credentials: &Self::Credentials) -> Result<InternalIdentityMapping, &'static str> {
+        if std::env::var("SOVEREIGN_LIVE_IDENTITY_TESTS").unwrap_or_default() == "1" {
+            check_live_server_active(&self.instance_url)?;
+            check_live_server_active(&self.relay_server)?;
+        }
+
         if credentials.user_did.is_empty() || credentials.relay_token.is_empty() {
             return Err("Missing User DID or Authentik Relay Token");
         }

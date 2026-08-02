@@ -1,9 +1,11 @@
 //! BGP router manifold synchronization and peer WireGuard tunneling module.
 
-use alloy_primitives::{Address, B256, U256};
+use alloy_primitives::{Address, B256};
 use boringtun::noise::{Tunn, TunnResult};
 use boringtun::x25519::{PublicKey, StaticSecret};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use crate::hw_offload::DataPlaneDriver;
 
 /// Details of a routed manifold path vector.
 #[derive(Debug, Clone)]
@@ -11,7 +13,7 @@ pub struct RouteInfo {
     /// Peer public key of the next hop relayer.
     pub next_hop: [u8; 32],
     /// Forwarding rate per kilobyte.
-    pub forwarding_rate: U256,
+    pub forwarding_rate: u64,
     /// Vector of supported settlement asset hashes.
     pub supported_assets: Vec<B256>,
 }
@@ -27,7 +29,9 @@ pub struct BgpRouter {
     /// `WireGuard` tunnels mapped by peer public key.
     pub tunnels: HashMap<[u8; 32], Tunn>,
     /// Dynamic routing table mapping target entity DID to path vector details.
-    pub routing_table: HashMap<String, RouteInfo>,
+    pub routing_table: HashMap<B256, RouteInfo>,
+    /// Data plane hardware offloader driver interface.
+    pub hw_driver: Arc<dyn DataPlaneDriver>,
 }
 
 impl Default for BgpRouter {
@@ -37,9 +41,15 @@ impl Default for BgpRouter {
 }
 
 impl BgpRouter {
-    /// Creates a new BGP Router with a randomly generated local private key.
+    /// Creates a new BGP Router with a randomly generated local private key and a mock hardware offloader.
     #[must_use]
     pub fn new() -> Self {
+        let hw_driver = Arc::new(crate::hw_offload::MockHardwareDriver::new());
+        Self::new_with_driver(hw_driver)
+    }
+
+    /// Creates a new BGP Router with a custom hardware offloader.
+    pub fn new_with_driver(hw_driver: Arc<dyn DataPlaneDriver>) -> Self {
         // Generate a random local private key using an array of 32 bytes
         let mut rng_bytes = [0u8; 32];
         for (i, byte) in rng_bytes.iter_mut().enumerate() {
@@ -55,6 +65,7 @@ impl BgpRouter {
             local_public_key,
             tunnels: HashMap::new(),
             routing_table: HashMap::new(),
+            hw_driver,
         }
     }
 
@@ -133,14 +144,74 @@ impl BgpRouter {
         }
     }
 
-    /// Updates or inserts a route in the BGP routing table.
+    /// Updates or inserts a route in the BGP routing table and pushes it to the hardware data plane.
     pub fn update_route(&mut self, dest_did: String, info: RouteInfo) {
-        self.routing_table.insert(dest_did, info);
+        let dest_hash = alloy_primitives::keccak256(dest_did.as_bytes());
+        let _ = self.hw_driver.push_route(dest_hash, info.next_hop, info.forwarding_rate);
+        self.routing_table.insert(dest_hash, info);
+    }
+
+    /// Speculatively initializes a route in the hardware data plane first, then verifies solvency
+    /// asynchronously. If verification fails, the route is immediately revoked from the hardware,
+    /// and the caller is slashed for speculative abuse.
+    pub fn speculative_update_route(
+        &mut self,
+        dest_did: String,
+        info: RouteInfo,
+        caller_witness: &mut crate::stateless::AccountWitness,
+        contract_witness: &crate::stateless::AccountWitness,
+        gas_limit: u64,
+        gas_price: alloy_primitives::U256,
+        tx_value: alloy_primitives::U256,
+        velocity: &crate::velocity::VelocityEngine,
+        bandwidth_request: crate::stateless::BandwidthRequest,
+    ) -> Result<alloy_primitives::U256, crate::stateless::SovereignError> {
+        let dest_hash = alloy_primitives::keccak256(dest_did.as_bytes());
+
+        // 1. Speculatively configure the hardware data plane INSTANTLY
+        let _ = self.hw_driver.push_route(dest_hash, info.next_hop, info.forwarding_rate);
+
+        // 2. Perform the control plane pre-flight verification
+        let res = crate::stateless::SovereignExecutor::pre_flight_execute(
+            caller_witness,
+            contract_witness,
+            gas_limit,
+            gas_price,
+            tx_value,
+            velocity,
+            Some(bandwidth_request),
+        );
+
+        match res {
+            Ok(upfront_penalty) => {
+                // Verification succeeded: lock route in the user-space routing table
+                self.routing_table.insert(dest_hash, info);
+                Ok(upfront_penalty)
+            }
+            Err(e) => {
+                // Verification failed! Revoke speculative route immediately
+                let _ = self.hw_driver.remove_route(dest_hash);
+
+                // Seize locked micro-collateral for the speculative routing attempt (Abuse Slashing Fine)
+                // Base penalty is 500,000 gas units equivalent
+                let abuse_slashing_penalty = alloy_primitives::U256::from(500_000);
+                caller_witness.balance = caller_witness.balance.saturating_sub(abuse_slashing_penalty);
+                Err(e)
+            }
+        }
+    }
+
+    /// Removes a route from the BGP table and the hardware data plane.
+    pub fn remove_route(&mut self, dest_did: &str) {
+        let dest_hash = alloy_primitives::keccak256(dest_did.as_bytes());
+        let _ = self.hw_driver.remove_route(dest_hash);
+        self.routing_table.remove(&dest_hash);
     }
 
     /// Retrieves route details for a given destination DID.
     pub fn get_route(&self, dest_did: &str) -> Option<&RouteInfo> {
-        self.routing_table.get(dest_did)
+        let dest_hash = alloy_primitives::keccak256(dest_did.as_bytes());
+        self.routing_table.get(&dest_hash)
     }
 
     /// Verifies if a destination DID belongs to the correct/expected manifold namespace.
@@ -153,7 +224,8 @@ impl BgpRouter {
         did.contains(expected_namespace)
     }
 
-    /// Broadcasts a `BasedMeshPacket` across all active `WireGuard` peer tunnels.
+
+    /// Broadcasts a `BasedMeshWrapper` across all active `WireGuard` peer tunnels.
     ///
     /// Encapsulates the Block-in-Blob state diff and succinct ZK validity proof into encrypted
     /// UDP tunnel packets ready for network transmission.
@@ -162,11 +234,11 @@ impl BgpRouter {
     /// Returns an error if serialization or encapsulation fails for any peer tunnel.
     pub fn broadcast_based_mesh_packet(
         &mut self,
-        packet: &crate::based_mesh::BasedMeshPacket,
+        packet: &crate::based_mesh::BasedMeshWrapper,
     ) -> Result<Vec<([u8; 32], Vec<u8>)>, String> {
         let raw_bytes = packet
             .to_bytes()
-            .map_err(|e| format!("Failed to serialize BasedMeshPacket: {e}"))?;
+            .map_err(|e| format!("Failed to serialize BasedMeshWrapper: {e}"))?;
 
         let mut out_buf = vec![0u8; 131_072 + 2048]; // Blob capacity + WireGuard header overhead
         let mut broadcast_payloads = Vec::new();
@@ -183,7 +255,7 @@ impl BgpRouter {
         Ok(broadcast_payloads)
     }
 
-    /// Decapsulates and validates an incoming `BasedMeshPacket` from a `WireGuard` peer tunnel.
+    /// Decapsulates and validates an incoming `BasedMeshWrapper` from a `WireGuard` peer tunnel.
     ///
     /// Verifies that the attached succinct ZK validity proof matches the state diff before
     /// forwarding to the consensus execution pool.
@@ -195,24 +267,24 @@ impl BgpRouter {
         peer_public_key: &[u8; 32],
         wg_packet: &[u8],
         out_buf: &mut [u8],
-    ) -> Result<Option<crate::based_mesh::BasedMeshPacket>, String> {
+    ) -> Result<Option<crate::based_mesh::BasedMeshWrapper>, String> {
         let decapsulated = self.handle_packet(peer_public_key, wg_packet, out_buf)?;
         if decapsulated.is_empty() {
             return Ok(None);
         }
 
         let packet = if decapsulated.len() == 131_072 {
-            crate::based_mesh::BasedMeshPacket::from_eip4844_blob_bytes(&decapsulated)
+            crate::based_mesh::BasedMeshWrapper::from_eip4844_blob_bytes(&decapsulated)
                 .map_err(|e| format!("Failed to decode EIP-4844 blob packet: {e}"))?
         } else {
-            crate::based_mesh::BasedMeshPacket::from_bytes(&decapsulated)
-                .map_err(|e| format!("Failed to decode raw BasedMeshPacket: {e}"))?
+            crate::based_mesh::BasedMeshWrapper::from_bytes(&decapsulated)
+                .map_err(|e| format!("Failed to decode raw BasedMeshWrapper: {e}"))?
         };
 
         // Validate ZK validity proof before returning
         packet
             .verify_validity_proof()
-            .map_err(|e| format!("Incoming BasedMeshPacket proof verification rejected: {e}"))?;
+            .map_err(|e| format!("Incoming BasedMeshWrapper proof verification rejected: {e}"))?;
 
         Ok(Some(packet))
     }
@@ -240,9 +312,120 @@ mod tests {
     }
 
     #[test]
+    fn test_hardware_offload_integration() {
+        let mock_driver = Arc::new(crate::hw_offload::MockHardwareDriver::new());
+        let mut router = BgpRouter::new_with_driver(mock_driver.clone());
+
+        let dest_did = "did:peer:4:as65007".to_string();
+        let dest_hash = alloy_primitives::keccak256(dest_did.as_bytes());
+
+        let next_hop = [9u8; 32];
+        let rate_limit = 500_000_000u64;
+
+        // Verify hardware table starts empty
+        assert!(!mock_driver.has_route(&dest_hash));
+
+        // Update route and check if it propagates to the mock hardware offloader
+        router.update_route(
+            dest_did.clone(),
+            RouteInfo {
+                next_hop,
+                forwarding_rate: rate_limit,
+                supported_assets: vec![B256::repeat_byte(0xee)],
+            },
+        );
+
+        assert!(mock_driver.has_route(&dest_hash));
+        let (hw_next_hop, hw_rate) = mock_driver.get_route(&dest_hash).unwrap();
+        assert_eq!(hw_next_hop, next_hop);
+        assert_eq!(hw_rate, rate_limit);
+
+        // Remove route and check if it is deleted from hardware offloader
+        router.remove_route(&dest_did);
+        assert!(!mock_driver.has_route(&dest_hash));
+    }
+
+    #[test]
+    fn test_speculative_route_initialization() {
+        let mock_driver = Arc::new(crate::hw_offload::MockHardwareDriver::new());
+        let mut router = BgpRouter::new_with_driver(mock_driver.clone());
+
+        let dest_did = "did:peer:4:as65008".to_string();
+        let dest_hash = alloy_primitives::keccak256(dest_did.as_bytes());
+
+        let next_hop = [8u8; 32];
+        let rate_limit = 200_000_000u64;
+
+        let mut caller = crate::stateless::AccountWitness {
+            balance: alloy_primitives::U256::from(10_000_000),
+            quadrant_matrix: [0, 0b111, 0b10, 0],
+            ..Default::default()
+        };
+        let contract = crate::stateless::AccountWitness {
+            balance: alloy_primitives::U256::ZERO,
+            quadrant_matrix: [0, 0b100, 0b10, 0],
+            ..Default::default()
+        };
+
+        let velocity = crate::velocity::VelocityEngine::default();
+        let req = crate::stateless::BandwidthRequest {
+            requested_kb_per_sec: 1_000,
+            rate_per_kb: 50,
+            epoch_duration_secs: 60,
+        }; // cost = 3_000_000
+
+        // 1. Success case: Sufficient balance
+        let res = router.speculative_update_route(
+            dest_did.clone(),
+            RouteInfo {
+                next_hop,
+                forwarding_rate: rate_limit,
+                supported_assets: vec![B256::repeat_byte(0xee)],
+            },
+            &mut caller,
+            &contract,
+            50_000,
+            alloy_primitives::U256::from(20),
+            alloy_primitives::U256::from(100_000),
+            &velocity,
+            req,
+        );
+
+        assert!(res.is_ok());
+        // Verify route is present in BGP table and hardware
+        assert!(router.routing_table.contains_key(&dest_hash));
+        assert!(mock_driver.has_route(&dest_hash));
+        assert_eq!(caller.balance, alloy_primitives::U256::from(10_000_000 - 3_100_000));
+
+        // 2. Failure case: Insolvent balance
+        caller.balance = alloy_primitives::U256::from(1_000_000); // Insufficient for next request
+        let res_fail = router.speculative_update_route(
+            dest_did.clone(),
+            RouteInfo {
+                next_hop,
+                forwarding_rate: rate_limit,
+                supported_assets: vec![B256::repeat_byte(0xee)],
+            },
+            &mut caller,
+            &contract,
+            50_000,
+            alloy_primitives::U256::from(20),
+            alloy_primitives::U256::from(100_000),
+            &velocity,
+            req,
+        );
+
+        assert!(res_fail.is_err());
+        // Verify speculative route is revoked from hardware
+        assert!(!mock_driver.has_route(&dest_hash));
+        // Verify user balance is slashed for speculative abuse (1M - 500k = 500k)
+        assert_eq!(caller.balance, alloy_primitives::U256::from(500_000));
+    }
+
+    #[test]
     fn test_pied_piper_7_hop_bandwidth_allocation() {
-        use alloy_primitives::{B256, U256};
-        use crate::based_mesh::{BasedMeshPacket, ProofScheme};
+        use alloy_primitives::B256;
+        use crate::based_mesh::{BasedMeshWrapper, ProofScheme};
 
         // 1. Instantiate 7 autonomous BGP routers representing 7 consecutive hops
         //    (AS 65001 -> AS 65002 -> ... -> AS 65007) in a Small World network experiment.
@@ -259,7 +442,7 @@ mod tests {
         // 3. Customer on AS 65001 emits a programmable bandwidth SLA intent:
         //    "Allocate 1 Gbps dedicated routing bandwidth across 7 hops to AS 65007 for 3600s."
         let sla_intent_payload = b"PIED_PIPER_SLA: 1Gbps / 3600s / 500 EURe / target AS 65007".to_vec();
-        let packet = BasedMeshPacket::new_with_valid_binding(
+        let packet = BasedMeshWrapper::new_with_valid_binding(
             65001,
             vec![65002, 65003, 65004, 65005, 65006, 65007],
             B256::repeat_byte(0x77),
@@ -281,7 +464,7 @@ mod tests {
         // 6. Hop-by-hop propagation and O(1) stateless ZK proof verification across all 7 hops
         for i in 1..7 {
             // Simulate receiving the block-in-blob packet at hop i
-            let received_packet = BasedMeshPacket::from_eip4844_blob_bytes(&blob_bytes).unwrap();
+            let received_packet = BasedMeshWrapper::from_eip4844_blob_bytes(&blob_bytes).unwrap();
             
             // O(1) verification: no interactive HTLC lock sagas required
             assert!(
@@ -297,19 +480,19 @@ mod tests {
                 "did:peer:4:as65007".to_string(),
                 RouteInfo {
                     next_hop: next_hop_key,
-                    forwarding_rate: U256::from(1_000_000_000u64), // 1 Gbps rate in bps
+                    forwarding_rate: 1_000_000_000u64, // 1 Gbps rate in bps
                     supported_assets: vec![B256::repeat_byte(0xee)], // Settled in EURe voucher
                 },
             );
 
             // Verify the route is actively advertised in the router's BGP table
             let route = routers[i].get_route("did:peer:4:as65007").unwrap();
-            assert_eq!(route.forwarding_rate, U256::from(1_000_000_000u64));
+            assert_eq!(route.forwarding_rate, 1_000_000_000u64);
             assert_eq!(route.supported_assets[0], B256::repeat_byte(0xee));
         }
 
         // 7. Verify small world end-to-end bandwidth allocation reached target AS 65007
         let final_route = routers[6].get_route("did:peer:4:as65007").unwrap();
-        assert_eq!(final_route.forwarding_rate, U256::from(1_000_000_000u64));
+        assert_eq!(final_route.forwarding_rate, 1_000_000_000u64);
     }
 }

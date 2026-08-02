@@ -114,7 +114,7 @@ impl CrossManifoldActor {
         state_diff_blob_hash: B256,
         proof_scheme: crate::based_mesh::ProofScheme,
         attestation_proof: Vec<u8>,
-    ) -> Result<crate::based_mesh::BasedMeshPacket, &'static str> {
+    ) -> Result<crate::based_mesh::BasedMeshWrapper, &'static str> {
         if self.state != ActorState::InitiateIntent {
             return Err("Cannot emit prepare attestation: actor is not in InitiateIntent state");
         }
@@ -131,7 +131,7 @@ impl CrossManifoldActor {
             timestamp: self.created_at,
         };
 
-        crate::based_mesh::BasedMeshPacket::from_message(
+        crate::based_mesh::BasedMeshWrapper::from_message(
             source_manifold_id,
             target_manifold_id,
             state_diff_blob_hash,
@@ -147,7 +147,7 @@ impl CrossManifoldActor {
     /// Returns an error if the attestation proof fails to verify or the message payload is invalid.
     pub fn process_attestation(
         &mut self,
-        packet: &crate::based_mesh::BasedMeshPacket,
+        packet: &crate::based_mesh::BasedMeshWrapper,
     ) -> Result<(), &'static str> {
         // Extract the embedded message (this verifies the ZK validity proof)
         let message = packet.extract_message()?;
@@ -186,7 +186,7 @@ impl CrossManifoldActor {
     /// Returns an error if the consensus threshold is not met, or if signature verification fails.
     pub async fn process_attestation_with_committee(
         &mut self,
-        packet: &crate::based_mesh::BasedMeshPacket,
+        packet: &crate::based_mesh::BasedMeshWrapper,
         committee: &crate::sync_committee::SagaOrchestratorCommittee,
         intent: &crate::sync_committee::SagaIntent,
         quantum_threat: bool,

@@ -65,4 +65,11 @@ impl VelocityEngine {
     pub fn is_circuit_breaker_triggered(&self, k: f64) -> bool {
         self.efficiency_ratio(k) < self.min_efficiency || self.v_speculative > (5.0 * self.v_productive)
     }
+
+    /// Computes the non-linear gas escalation scalar f(V) = 1.0 + (v_speculative / (v_productive + 0.001))^2
+    #[must_use]
+    pub fn gas_escalation_scalar(&self) -> f64 {
+        let ratio = self.v_speculative / (self.v_productive + 0.001);
+        1.0 + ratio * ratio
+    }
 }

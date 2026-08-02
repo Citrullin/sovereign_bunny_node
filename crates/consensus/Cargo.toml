@@ -27,6 +27,7 @@ reth-primitives-traits = { workspace = true }
 reth-chainspec = { workspace = true }
 nmt-rs = { workspace = true }
 boringtun = { workspace = true }
+scale = { workspace = true }
 k256 = { workspace = true }
 ed25519-dalek = { workspace = true }
 sovereign-attestation = { path = "../attestation" }

@@ -2,7 +2,8 @@
 //! Allows members of an organization to expose a compliant query relay endpoint
 //! bridging external X-Road Security Server calls to the Sovereign Reth consensus layer.
 
-use sovereign_consensus::metalex::MetalexManager;
+use sovereign_identity::did::SovereignDidDocument;
+use std::collections::HashMap;
 
 /// Mock X-Road SOAP request header structures.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -18,44 +19,42 @@ pub struct XRoadRequestHeader {
 }
 
 /// A relay server instance mapping X-Road queries to the consensus layer.
+#[derive(Clone, Default)]
 pub struct XRoadRelay {
-    /// Reference to the consensus organization manager
-    pub metalex_manager: MetalexManager,
+    /// Reference to resolved DIDs
+    pub dids: HashMap<String, SovereignDidDocument>,
 }
 
 impl XRoadRelay {
     /// Creates a new X-Road Relay instance.
     #[must_use]
-    pub fn new(metalex_manager: MetalexManager) -> Self {
-        Self { metalex_manager }
+    pub fn new(dids: HashMap<String, SovereignDidDocument>) -> Self {
+        Self { dids }
     }
 
     /// Handles a SOAP-like X-Road payload query.
     ///
-    /// Exposes organization structure to external systems in a signed, auditable format.
+    /// Exposes DID document structure to external systems in a signed, auditable format.
     ///
     /// # Errors
-    /// Returns an error if the `org_did` is not found or serialization fails.
-    pub fn query_organization_state(&self, org_did: &str, _header: &XRoadRequestHeader) -> Result<String, &'static str> {
-        if let Some(org) = self.metalex_manager.orgs.get(org_did) {
+    /// Returns an error if the `did_uri` is not found or serialization fails.
+    pub fn query_organization_state(&self, did_uri: &str, _header: &XRoadRequestHeader) -> Result<String, &'static str> {
+        if let Some(did) = self.dids.get(did_uri) {
             // Build response signed by the organization's did:peer:4 key.
-            // In a real system, the server signs using HSM or the peer's private key.
-            // We represent the signed payload as a JSON document containing the organization state
-            // and a mock cryptographic signature.
-            let payload = serde_json::to_string(org).map_err(|_| "Failed to serialize org state")?;
-            let mock_signature = format!("signed:did:peer:4:{org_did}");
+            let mock_signature = format!("signed:{}", did_uri);
             
             let response = serde_json::json!({
                 "xroad_response": {
                     "status": "success",
-                    "payload": payload,
+                    "did_uri": did.did_uri,
+                    "evm_address": did.evm_address,
                     "signature": mock_signature
                 }
             });
             
             Ok(response.to_string())
         } else {
-            Err("Organization not found in consensus registry")
+            Err("DID not found in consensus registry")
         }
     }
 }
@@ -63,30 +62,16 @@ impl XRoadRelay {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
-    use sovereign_consensus::metalex::BorgOrganization;
+    use alloy_primitives::B256;
 
     #[test]
     fn test_xroad_relay_query() {
-        let mut metalex_manager = MetalexManager::new();
-        let mut agents = HashMap::new();
-        agents.insert("did:peer:4:alice".to_string(), "director".to_string());
+        let mut dids = HashMap::new();
+        let doc = SovereignDidDocument::derive_from_seed(B256::repeat_byte(0x01));
+        let did_uri = doc.did_uri.clone();
+        dids.insert(did_uri.clone(), doc);
         
-        let org = BorgOrganization {
-            did_peer: "did:peer:4:sovereign_co".to_string(),
-            equity_token: "0xEquityAddress".to_string(),
-            agents,
-            is_active: true,
-        };
-        
-        // Setup registry
-        let audit = sovereign_consensus::metalex::RealityAudit {
-            epoch: 1,
-            validator_signatures: vec![alloy_primitives::Bytes::from_static(&[1])],
-        };
-        let _ = metalex_manager.register_or_update_org(org, &audit, 1);
-        
-        let relay = XRoadRelay::new(metalex_manager);
+        let relay = XRoadRelay::new(dids);
         let header = XRoadRequestHeader {
             client: "gov-dept-x".to_string(),
             service: "getOrgStructure".to_string(),
@@ -94,8 +79,8 @@ mod tests {
             protocol_version: "4.0".to_string(),
         };
         
-        let response = relay.query_organization_state("did:peer:4:sovereign_co", &header).unwrap();
-        assert!(response.contains("0xEquityAddress"));
-        assert!(response.contains("signed:did:peer:4:did:peer:4:sovereign_co"));
+        let response = relay.query_organization_state(&did_uri, &header).unwrap();
+        assert!(response.contains("did_uri"));
+        assert!(response.contains(&format!("signed:{}", did_uri)));
     }
 }

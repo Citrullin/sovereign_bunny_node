@@ -40,9 +40,7 @@ reth-ethereum-primitives = { git = "https://github.com/paradigmxyz/reth", tag = 
 reth-db = { git = "https://github.com/paradigmxyz/reth", tag = "v2.4.0" }
 reth-provider = { git = "https://github.com/paradigmxyz/reth", tag = "v2.4.0" }
 reth-transaction-pool = { git = "https://github.com/paradigmxyz/reth", tag = "v2.4.0", features = ["test-utils"] }
-reth-consensus = { git = "https://github.com/paradigmxyz/reth", tag = "v2.4.0" }
 reth-exex = { git = "https://github.com/paradigmxyz/reth", tag = "v2.4.0" }
-reth-stages = { git = "https://github.com/paradigmxyz/reth", tag = "v2.4.0" }
 reth-primitives-traits = "0.5.0"
 reth-chainspec = { git = "https://github.com/paradigmxyz/reth", tag = "v2.4.0" }
 reth-node-core = { git = "https://github.com/paradigmxyz/reth", tag = "v2.4.0" }
@@ -56,7 +54,6 @@ boringtun = "0.7.1"
 nmt-rs = "0.2.5"
 tiny-keccak = { version = "2.0.2", features = ["keccak"] }
 siwe = "0.6.1"
-alloy = { version = "0.2", features = ["full", "rpc-client"] }
 reed-solomon-erasure = "6.0.0"
 dcap-qvl = "0.5.2"
 toml = "0.8"
@@ -80,7 +77,6 @@ sovereign-consensus = { path = "crates/consensus" }
 sovereign-attestation = { path = "crates/attestation" }
 sovereign-identity = { path = "crates/identity" }
 sovereign-network = { path = "crates/network" }
-sovereign-crypto = { path = "crates/crypto" }
 
 [profile.dev]
 debug = 0

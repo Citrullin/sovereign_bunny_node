@@ -32,7 +32,7 @@ contract SimplePaymaster {
         UserOperation calldata /*userOp*/,
         bytes32 /*userOpHash*/,
         uint256 /*maxCost*/
-    ) external view returns (bytes memory context, uint256 validationData) {
+    ) external pure returns (bytes memory context, uint256 validationData) {
         // Return 0 to indicate signature / validation is valid
         return ("", 0);
     }
@@ -41,6 +41,6 @@ contract SimplePaymaster {
         PostOpMode /*mode*/,
         bytes calldata /*context*/,
         uint256 /*actualGasCost*/
-    ) external view {
+    ) external pure {
     }
 }

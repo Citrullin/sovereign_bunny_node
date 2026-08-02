@@ -56,3 +56,63 @@ impl SnowSubsetElection {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_snow_subset_election_success() {
+        let mut election = SnowSubsetElection::new(42);
+        let mut pool = HashSet::new();
+        let addr1 = Address::repeat_byte(0x01);
+        let addr2 = Address::repeat_byte(0x02);
+        let addr3 = Address::repeat_byte(0x03);
+        pool.insert(addr1);
+        pool.insert(addr2);
+        pool.insert(addr3);
+
+        // Elect 2 out of 3 validators
+        let res = election.trigger_election(&pool, 100, 2);
+        assert!(res.is_ok());
+        assert_eq!(election.current_subset.len(), 2);
+        for addr in &election.current_subset {
+            assert!(pool.contains(addr));
+        }
+
+        // Test deterministic behavior: same epoch & pool must yield the exact same subset
+        let mut election2 = SnowSubsetElection::new(42);
+        let res2 = election2.trigger_election(&pool, 100, 2);
+        assert!(res2.is_ok());
+        assert_eq!(election.current_subset, election2.current_subset);
+
+        // Test epoch rotation: different epoch should yield a potentially different sort/subset (or same if sample size matches pool)
+        let mut election3 = SnowSubsetElection::new(42);
+        let _ = election3.trigger_election(&pool, 200, 2);
+        assert_eq!(election3.current_subset.len(), 2);
+    }
+
+    #[test]
+    fn test_snow_subset_election_empty_pool() {
+        let mut election = SnowSubsetElection::new(42);
+        let pool = HashSet::new();
+        let res = election.trigger_election(&pool, 100, 2);
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err(), "No routable validators available for election.");
+        assert!(election.current_subset.is_empty());
+    }
+
+    #[test]
+    fn test_snow_subset_election_clamped_sample_size() {
+        let mut election = SnowSubsetElection::new(42);
+        let mut pool = HashSet::new();
+        let addr1 = Address::repeat_byte(0x01);
+        pool.insert(addr1);
+
+        // Requesting 5 items from a pool of 1 should clamp to 1 item
+        let res = election.trigger_election(&pool, 100, 5);
+        assert!(res.is_ok());
+        assert_eq!(election.current_subset.len(), 1);
+        assert!(election.current_subset.contains(&addr1));
+    }
+}

@@ -93,8 +93,6 @@ pub struct DynamicConfig {
     pub manifold_quorum_threshold: usize,
     /// Minimum reputation required to promote social validators (e.g. 0.05).
     pub social_promotion_threshold: f64,
-    /// Validator count threshold for MetaLex reality audit verification (e.g. 2).
-    pub metalex_validator_count_threshold: usize,
     /// Toggle to instantly mandate post-quantum signature verification schemes across the network.
     #[serde(alias = "quantum_threat", default)]
     pub zero_latency_quantum_trigger: bool,
@@ -103,6 +101,12 @@ pub struct DynamicConfig {
     pub default_pq_scheme: String,
     /// Default cryptographic profile (e.g. "ethereum", "throughput", "quantum_standard").
     pub default_crypto_profile: String,
+    /// Block height at which a genesis softfork occurs to switch crypto profiles automatically.
+    #[serde(default)]
+    pub profile_switch_block_height: Option<u64>,
+    /// The next cryptographic profile to activate at the switch block height.
+    #[serde(default)]
+    pub next_crypto_profile: Option<String>,
     /// Saga intent validity window / timeout in seconds (e.g., 86400).
     pub saga_intent_timeout_seconds: u64,
     /// Threshold to reach orchestrator quorum for a Saga Intent (e.g. 0.67).
@@ -112,6 +116,9 @@ pub struct DynamicConfig {
     /// Pluggable parallel EVM execution engine selection (e.g. "wave", "pevm", "grevm").
     #[serde(default = "default_parallel_engine")]
     pub parallel_execution_engine: String,
+    /// Dynamic, consensus-driven registry of CAIP-2 namespaces mapped to Signature and Hash schemes.
+    #[serde(default = "default_caip_registry")]
+    pub caip_registry: std::collections::HashMap<String, (crate::crypto::SignatureScheme, crate::crypto::HashScheme)>,
 }
 
 fn default_parallel_engine() -> String {
@@ -122,20 +129,33 @@ fn default_pq_scheme() -> String {
     "mldsa".to_string()
 }
 
+fn default_caip_registry() -> std::collections::HashMap<String, (crate::crypto::SignatureScheme, crate::crypto::HashScheme)> {
+    let mut map = std::collections::HashMap::new();
+    map.insert("eip155".to_string(), (crate::crypto::SignatureScheme::Secp256k1, crate::crypto::HashScheme::Keccak256));
+    map.insert("solana".to_string(), (crate::crypto::SignatureScheme::Ed25519, crate::crypto::HashScheme::Blake3));
+    map.insert("cosmos".to_string(), (crate::crypto::SignatureScheme::Secp256k1, crate::crypto::HashScheme::Sha256));
+    map.insert("bip122".to_string(), (crate::crypto::SignatureScheme::Secp256k1, crate::crypto::HashScheme::Sha256));
+    map.insert("polkadot".to_string(), (crate::crypto::SignatureScheme::Ed25519, crate::crypto::HashScheme::Blake3));
+    map.insert("tezos".to_string(), (crate::crypto::SignatureScheme::Secp256r1, crate::crypto::HashScheme::Keccak256));
+    map
+}
+
 impl Default for DynamicConfig {
     fn default() -> Self {
         Self {
             sgx_reputation_threshold: 0.0,
             manifold_quorum_threshold: 500,
             social_promotion_threshold: 0.05,
-            metalex_validator_count_threshold: 2,
             zero_latency_quantum_trigger: false,
             default_pq_scheme: default_pq_scheme(),
             default_crypto_profile: "ethereum".to_string(),
+            profile_switch_block_height: None,
+            next_crypto_profile: None,
             saga_intent_timeout_seconds: 86400,
             committee_threshold: 0.67,
             connectivity_decay_penalty: 0.10,
             parallel_execution_engine: "wave".to_string(),
+            caip_registry: default_caip_registry(),
         }
     }
 }

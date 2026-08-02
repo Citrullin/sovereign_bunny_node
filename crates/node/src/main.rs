@@ -19,6 +19,8 @@ use tracing::{debug, info};
 
 /// Node configuration module.
 pub mod config;
+/// CAIP RPC Proxy module.
+pub mod caip_rpc;
 
 use sovereign_consensus::SovereignPoolBuilder;
 use clap::Parser;
@@ -27,64 +29,64 @@ use clap::Parser;
 #[derive(Debug, Clone, clap::Args)]
 pub struct SovereignArgs {
     /// Type of the node (replica or validator)
-    #[arg(long, default_value = "replica")]
-    pub node_type: String,
+    #[arg(long = "sov-node-type", default_value = "replica")]
+    pub sov_node_type: String,
 
     /// TEE execution mode (sgx, nitro, or none)
-    #[arg(long, default_value = "none")]
-    pub tee: String,
+    #[arg(long = "sov-tee", default_value = "none")]
+    pub sov_tee: String,
 
     /// Operator's did:peer:4 identity string
-    #[arg(long)]
-    pub did_peer4: Option<String>,
+    #[arg(long = "sov-did-peer4")]
+    pub sov_did_peer4: Option<String>,
 
     /// Path to operator delegation signature/proof file
-    #[arg(long)]
-    pub delegation_proof: Option<std::path::PathBuf>,
+    #[arg(long = "sov-delegation-proof")]
+    pub sov_delegation_proof: Option<std::path::PathBuf>,
 
     /// `TinyMeritRank` reputation threshold for admission
-    #[arg(long, default_value_t = 0.0)]
-    pub merit_threshold: f64,
+    #[arg(long = "sov-merit-threshold", default_value_t = 0.0)]
+    pub sov_merit_threshold: f64,
 
-    /// Path to the TOML configuration file
-    #[arg(long)]
-    pub config: Option<std::path::PathBuf>,
+    /// Path to the Sovereign TOML configuration file
+    #[arg(long = "sov-config")]
+    pub sov_config: Option<std::path::PathBuf>,
 
     /// Zero Latency Quantum Trigger flag (alias: quantum threat) to mandate post-quantum signature schemes
-    #[arg(long, alias = "quantum-threat", default_value_t = false)]
-    pub zero_latency_quantum_trigger: bool,
+    #[arg(long = "sov-zero-latency-quantum-trigger", alias = "quantum-threat", default_value_t = false)]
+    pub sov_zero_latency_quantum_trigger: bool,
 
     /// Default post-quantum signature scheme when Zero Latency Quantum Trigger is active (e.g., mldsa, slhdsa, falcon)
-    #[arg(long, alias = "pq-algo")]
-    pub pq_scheme: Option<String>,
+    #[arg(long = "sov-pq-scheme", alias = "pq-algo")]
+    pub sov_pq_scheme: Option<String>,
 
     /// Block time in milliseconds (e.g., 2000 for 2s)
-    #[arg(long, alias = "block-time")]
-    pub block_time: Option<u64>,
+    #[arg(long = "sov-block-time")]
+    pub sov_block_time: Option<u64>,
 
     /// Default cryptographic profile (e.g., ethereum, throughput, quantum_standard)
-    #[arg(long, alias = "crypto-profile")]
-    pub crypto_profile: Option<String>,
+    #[arg(long = "sov-crypto-profile")]
+    pub sov_crypto_profile: Option<String>,
 
     /// Pluggable parallel EVM execution engine selection (e.g. wave, pevm, grevm)
-    #[arg(long, alias = "parallel-engine")]
-    pub parallel_engine: Option<String>,
+    #[arg(long = "sov-parallel-engine")]
+    pub sov_parallel_engine: Option<String>,
 }
 
 impl Default for SovereignArgs {
     fn default() -> Self {
         Self {
-            node_type: "replica".to_string(),
-            tee: "none".to_string(),
-            did_peer4: None,
-            delegation_proof: None,
-            merit_threshold: 0.0,
-            config: None,
-            zero_latency_quantum_trigger: false,
-            pq_scheme: None,
-            block_time: None,
-            crypto_profile: None,
-            parallel_engine: None,
+            sov_node_type: "replica".to_string(),
+            sov_tee: "none".to_string(),
+            sov_did_peer4: None,
+            sov_delegation_proof: None,
+            sov_merit_threshold: 0.0,
+            sov_config: None,
+            sov_zero_latency_quantum_trigger: false,
+            sov_pq_scheme: None,
+            sov_block_time: None,
+            sov_crypto_profile: None,
+            sov_parallel_engine: None,
         }
     }
 }
@@ -106,7 +108,7 @@ async fn sovereign_exex<N: FullNodeComponents>(
     mut ctx: ExExContext<N>,
     args: SovereignArgs,
 ) -> eyre::Result<impl Future<Output = eyre::Result<()>>> {
-    let tee_mode = args.tee.to_lowercase();
+    let tee_mode = args.sov_tee.to_lowercase();
 
     Ok(async move {
         info!("Sovereign Pluggable TEE ExEx started! Mode: {tee_mode}");
@@ -162,12 +164,35 @@ fn main() {
         .with_bal_parallel_execution_disabled(false)
         .try_init();
 
-    if let Err(err) = Cli::<EthereumChainSpecParser, SovereignArgs>::parse().run(async move |builder, args| {
-        info!("Launching Sovereign Reth Node (Node Type: {}, TEE Mode: {})", args.node_type, args.tee);
+    // Intercept HTTP port to run proxy
+    let mut env_args: Vec<String> = std::env::args().collect();
+    let mut port = 8545;
+    let mut port_idx = None;
+    for (i, arg) in env_args.iter().enumerate() {
+        if arg == "--http.port" && i + 1 < env_args.len() {
+            if let Ok(p) = env_args[i + 1].parse::<u16>() {
+                port = p;
+                port_idx = Some(i + 1);
+            }
+        }
+    }
+
+    let reth_port = port + 1;
+    if let Some(idx) = port_idx {
+        env_args[idx] = reth_port.to_string();
+    } else {
+        if env_args.iter().any(|arg| arg == "--http" || arg == "node") {
+            env_args.push("--http.port".to_string());
+            env_args.push(reth_port.to_string());
+        }
+    }
+
+    if let Err(err) = Cli::<EthereumChainSpecParser, SovereignArgs>::parse_from(env_args).run(async move |builder, args| {
+        info!("Launching Sovereign Reth Node (Node Type: {}, TEE Mode: {})", args.sov_node_type, args.sov_tee);
 
         let mut static_cfg = sovereign_consensus::config::StaticConfig::default();
         let mut dynamic_cfg = sovereign_consensus::config::DynamicConfig::default();
-        if let Some(cfg_path) = &args.config {
+        if let Some(cfg_path) = &args.sov_config {
             match config::NodeConfig::load_from_file(cfg_path) {
                 Ok(cfg) => {
                     static_cfg = cfg.static_cfg;
@@ -183,27 +208,27 @@ fn main() {
         let env_quantum = std::env::var("QUANTUM_THREAT")
             .map(|val| val == "true" || val == "1")
             .unwrap_or(false);
-        if args.zero_latency_quantum_trigger || env_quantum {
+        if args.sov_zero_latency_quantum_trigger || env_quantum {
             dynamic_cfg.zero_latency_quantum_trigger = true;
             info!("Zero Latency Quantum Trigger activated (mandating post-quantum signature schemes)");
         }
 
-        if let Some(scheme) = args.pq_scheme.clone().or_else(|| std::env::var("PQ_SCHEME").ok()).or_else(|| std::env::var("DEFAULT_PQ_SCHEME").ok()) {
+        if let Some(scheme) = args.sov_pq_scheme.clone().or_else(|| std::env::var("PQ_SCHEME").ok()).or_else(|| std::env::var("DEFAULT_PQ_SCHEME").ok()) {
             dynamic_cfg.default_pq_scheme = scheme.to_lowercase();
             info!("Configured default post-quantum scheme: {}", dynamic_cfg.default_pq_scheme);
         }
 
-        if let Some(block_time) = args.block_time {
+        if let Some(block_time) = args.sov_block_time {
             static_cfg.epoch.block_time_ms = block_time;
             info!("Configured block time from CLI: {}ms", block_time);
         }
 
-        if let Some(profile) = args.crypto_profile.clone() {
+        if let Some(profile) = args.sov_crypto_profile.clone() {
             dynamic_cfg.default_crypto_profile = profile.to_lowercase();
             info!("Configured default crypto profile from CLI: {}", dynamic_cfg.default_crypto_profile);
         }
 
-        if let Some(engine) = args.parallel_engine.clone() {
+        if let Some(engine) = args.sov_parallel_engine.clone() {
             dynamic_cfg.parallel_execution_engine = engine.to_lowercase();
             info!("Configured parallel execution engine from CLI: {}", dynamic_cfg.parallel_execution_engine);
         }
@@ -225,6 +250,10 @@ fn main() {
                 .install_exex("sovereign_exex", move |ctx| sovereign_exex(ctx, args.clone()))
                 .launch_with_debug_capabilities()
                 .await?;
+            
+            // Start the CAIP RPC proxy
+            let _ = tokio::spawn(caip_rpc::run_proxy(port, reth_port));
+
             handle.wait_for_node_exit().await
         } else {
             let handle = builder
@@ -238,6 +267,10 @@ fn main() {
                 .install_exex("sovereign_exex", move |ctx| sovereign_exex(ctx, args.clone()))
                 .launch()
                 .await?;
+            
+            // Start the CAIP RPC proxy
+            let _ = tokio::spawn(caip_rpc::run_proxy(port, reth_port));
+
             handle.wait_for_node_exit().await
         }
     }) {
@@ -274,7 +307,6 @@ max_attempts = 500
 sgx_reputation_threshold = 0.5
 manifold_quorum_threshold = 100
 social_promotion_threshold = 0.1
-metalex_validator_count_threshold = 5
 default_crypto_profile = "ethereum"
 saga_intent_timeout_seconds = 86400
 committee_threshold = 0.67
@@ -296,7 +328,6 @@ connectivity_decay_penalty = 0.10
         assert_eq!(config.dynamic_cfg.sgx_reputation_threshold, 0.5);
         assert_eq!(config.dynamic_cfg.manifold_quorum_threshold, 100);
         assert_eq!(config.dynamic_cfg.social_promotion_threshold, 0.1);
-        assert_eq!(config.dynamic_cfg.metalex_validator_count_threshold, 5);
         assert_eq!(config.dynamic_cfg.default_pq_scheme, "mldsa");
         assert_eq!(config.dynamic_cfg.default_crypto_profile, "ethereum");
         assert_eq!(config.dynamic_cfg.saga_intent_timeout_seconds, 86400);
@@ -331,13 +362,14 @@ connectivity_decay_penalty = 0.10
 
 
     #[test]
-    fn test_integration_nfc_namespace_metalex() {
+    fn test_integration_nfc_namespace_did() {
         use sovereign_network::handshake::ZeroConfigMesh;
         use sovereign_identity::zkp_auth::NfcCredentials;
         use sovereign_identity::namespace::NamespaceRegistry;
-        use sovereign_consensus::metalex::{BorgOrganization, RealityAudit, MetalexManager};
+        use sovereign_identity::did::SovereignDidDocument;
         use sovereign_network::xroad::{XRoadRelay, XRoadRequestHeader};
         use std::collections::HashMap;
+        use alloy_primitives::B256;
 
         // 1. Peer Node A and Node B via simulated NFC tap
         use ed25519_dalek::{SigningKey, Signer};
@@ -372,37 +404,23 @@ connectivity_decay_penalty = 0.10
         let mut ns_registry = NamespaceRegistry::new();
         assert!(ns_registry.register("nodea.sovereign".into(), node_a_did.clone(), 10.0, 0));
 
-        // 3. Register Node A's MetaLex organization contract with a Reality Audit
-        let mut metalex_manager = MetalexManager::new();
-        let mut agents = HashMap::new();
-        agents.insert(node_a_did.to_string(), "director".to_string());
-        
-        let org = BorgOrganization {
-            did_peer: node_a_did.to_string(),
-            equity_token: "0xEquityAddressNodeA".to_string(),
-            agents,
-            is_active: true,
-        };
-        let audit = RealityAudit {
-            epoch: 1,
-            validator_signatures: vec![
-                alloy_primitives::Bytes::from_static(&[1, 2]),
-                alloy_primitives::Bytes::from_static(&[3, 4]),
-            ], // threshold met
-        };
-        assert!(metalex_manager.register_or_update_org(org, &audit, 2).is_ok());
+        // 3. Setup X-Road Relay with a resolved DID
+        let mut dids = HashMap::new();
+        let doc = SovereignDidDocument::derive_from_seed(B256::repeat_byte(0x02));
+        let did_uri = doc.did_uri.clone();
+        dids.insert(did_uri.clone(), doc);
 
         // 4. Query organization status optionally via X-Road
-        let relay = XRoadRelay::new(metalex_manager);
+        let relay = XRoadRelay::new(dids);
         let header = XRoadRequestHeader {
             client: "regulator".to_string(),
             service: "verifyOrg".to_string(),
             id: "tx-777".to_string(),
             protocol_version: "4.0".to_string(),
         };
-        let response = relay.query_organization_state(&node_a_did, &header).unwrap();
-        assert!(response.contains("0xEquityAddressNodeA"));
-        assert!(response.contains(&node_a_did));
+        let response = relay.query_organization_state(&did_uri, &header).unwrap();
+        assert!(response.contains("did_uri"));
+        assert!(response.contains(&did_uri));
     }
 
 }

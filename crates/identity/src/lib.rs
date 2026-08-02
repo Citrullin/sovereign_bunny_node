@@ -7,6 +7,7 @@
 pub mod delegation;
 pub mod zkp_auth;
 pub mod namespace;
+/// Decentralized Identifier (DID) management module.
 pub mod did;
 
 /// The supported key types in DID Peer 4.
@@ -14,8 +15,14 @@ pub mod did;
 pub enum KeyType {
     /// Ed25519 signature key type
     Ed25519,
-    /// Secp256k1 signature key type
+    /// Secp256k1 signature key type (Ethereum)
     Secp256k1,
+    /// Secp256r1 signature key type (NIST P-256)
+    Secp256r1,
+    /// Pasta signature key type (Mina)
+    Pasta,
+    /// Bls12-381 signature key type
+    Bls,
     /// Post-Quantum ML-DSA (Dilithium) lattice-based signature key type
     MlDsa,
     /// Post-Quantum SLH-DSA (SPHINCS+) stateless hash-based signature key type
@@ -37,6 +44,9 @@ impl From<KeyType> for sovereign_crypto::SignatureScheme {
         match kt {
             KeyType::Ed25519 => sovereign_crypto::SignatureScheme::Ed25519,
             KeyType::Secp256k1 => sovereign_crypto::SignatureScheme::Secp256k1,
+            KeyType::Secp256r1 => sovereign_crypto::SignatureScheme::Secp256r1,
+            KeyType::Pasta => sovereign_crypto::SignatureScheme::Pasta,
+            KeyType::Bls => sovereign_crypto::SignatureScheme::Bls,
             KeyType::MlDsa => sovereign_crypto::SignatureScheme::MlDsa,
             KeyType::SlhDsa => sovereign_crypto::SignatureScheme::SlhDsa,
             KeyType::Falcon => sovereign_crypto::SignatureScheme::Falcon,
@@ -156,6 +166,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_did_peer4_resolve_multikey() {
+        let keys = vec![
+            did_peer::DIDPeerCreateKeys {
+                type_: Some(did_peer::DIDPeerKeyType::Secp256k1),
+                purpose: did_peer::DIDPeerKeys::Verification,
+                public_key_multibase: Some("zQ3shok17vjUvJgqG3Yme5fQwQDndx8C5Jea95D4A8YnUFs2t".into()),
+            },
+            did_peer::DIDPeerCreateKeys {
+                type_: Some(did_peer::DIDPeerKeyType::Ed25519),
+                purpose: did_peer::DIDPeerKeys::Verification,
+                public_key_multibase: Some("z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK".into()),
+            },
+        ];
+        let (did, _) = did_peer::DIDPeer::create_peer_did(&keys, None).unwrap();
+        // Check that the generated multi-key DID works
+        let doc = did_peer::DIDPeer.resolve(&did).await.unwrap();
+        assert_eq!(doc.verification_method.len(), 2);
+    }
+
+    #[tokio::test]
     async fn test_did_peer4_invalid_format() {
         assert!(DidPeer4::resolve("did:peer:3:z6M").await.is_err());
         assert!(DidPeer4::resolve("did:peer:4:").await.is_err());
@@ -194,6 +224,15 @@ mod tests {
         let invalid_siwe = "invalid message";
         assert!(auth.verify_identity(&invalid_siwe.to_string()).is_err());
     }
+
+    #[test]
+    fn test_live_identity_connection_failure() {
+        let res = zkp_auth::check_live_server_active("https://nonexistent-authentik-server.xyz");
+        assert!(res.is_err());
+        let err_msg = res.unwrap_err();
+        assert!(err_msg.contains("Connection") || err_msg.contains("resolve") || err_msg.contains("refused"));
+    }
+
 
 
 

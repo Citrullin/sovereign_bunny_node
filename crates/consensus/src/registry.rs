@@ -220,7 +220,16 @@ impl ValidatorRegistry {
                 derived.copy_from_slice(&hash[12..32]);
                 Address::from(derived)
             }
+            sovereign_identity::KeyType::Secp256r1 => {
+                Address::from(crate::crypto::derive_address(crate::crypto::HashScheme::Keccak256, &resolved.public_key))
+            }
             sovereign_identity::KeyType::Ed25519 => {
+                Address::from(crate::crypto::derive_address(crate::crypto::HashScheme::Blake3, &resolved.public_key))
+            }
+            sovereign_identity::KeyType::Pasta => {
+                Address::from(crate::crypto::derive_address(crate::crypto::HashScheme::Poseidon, &resolved.public_key))
+            }
+            sovereign_identity::KeyType::Bls => {
                 Address::from(crate::crypto::derive_address(crate::crypto::HashScheme::Blake3, &resolved.public_key))
             }
             sovereign_identity::KeyType::MlDsa => {
@@ -567,6 +576,61 @@ impl ValidatorRegistry {
         self.peer_keys.insert(did.clone(), peer_key);
         self.address_to_did.insert(addr, did);
     }
+
+    /// Resolves and registers a user DID, mapping their EVM Address.
+    pub fn register_user_did(&mut self, candidate_did: String) -> Result<Address, &'static str> {
+        let did_str = candidate_did.clone();
+        let doc = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                let resolver = did_peer::DIDPeer;
+                resolver.resolve(&did_str).await
+            })
+        }).join().map_err(|_| "Thread panic during DID verification")?
+        .map_err(|_| "Failed to resolve DID document")?;
+
+        let mut has_secp256k1 = false;
+        let mut has_ed25519 = false;
+
+        for vm in &doc.verification_method {
+            let key_type = match vm.type_.as_str() {
+                "JsonWebKey2020" => sovereign_identity::KeyType::Secp256k1,
+                _ => {
+                    if let Ok(public_key) = vm.get_public_key_bytes() {
+                        if public_key.len() == 32 {
+                            sovereign_identity::KeyType::Ed25519
+                        } else {
+                            sovereign_identity::KeyType::Secp256k1
+                        }
+                    } else {
+                        sovereign_identity::KeyType::Secp256k1
+                    }
+                }
+            };
+            if key_type == sovereign_identity::KeyType::Secp256k1 {
+                has_secp256k1 = true;
+            } else if key_type == sovereign_identity::KeyType::Ed25519 {
+                has_ed25519 = true;
+            }
+        }
+
+        if !has_secp256k1 || !has_ed25519 {
+            return Err("Sovereign DID Error: DID is missing required verification keys. Please provision Secp256k1 and Ed25519 keys.");
+        }
+
+        let (addr, wg_key) = self.resolve_did_keys(&candidate_did)?;
+        self.peer_keys.insert(candidate_did.clone(), wg_key);
+        self.address_to_did.insert(addr, candidate_did);
+        Ok(addr)
+    }
+
+    /// Checks if a DID is registered in the validator or user directory.
+    pub fn is_did_registered(&self, did: &str) -> bool {
+        self.peer_keys.contains_key(did)
+    }
 }
 
 use std::sync::{OnceLock, RwLock};
@@ -688,5 +752,39 @@ mod tests {
         // Commitments list should be reset/cleared for the next epoch
         assert!(registry.commitments.is_empty());
     }
+
+    #[test]
+    fn test_caip_namespace_resolution() {
+        let res = super::resolve_caip_namespace("solana").unwrap();
+        assert_eq!(res.0, crate::crypto::SignatureScheme::Ed25519);
+        assert_eq!(res.1, crate::crypto::HashScheme::Blake3);
+
+        let namespaces = super::signature_scheme_to_caip_namespaces(crate::crypto::SignatureScheme::Secp256k1);
+        assert!(namespaces.contains(&"eip155".to_string()));
+        assert!(namespaces.contains(&"cosmos".to_string()));
+    }
+}
+
+/// Resolves a CAIP-2 namespace into its native cryptographic SignatureScheme and HashScheme.
+pub fn resolve_caip_namespace(namespace: &str) -> Option<(crate::crypto::SignatureScheme, crate::crypto::HashScheme)> {
+    let registry = get_registry().read().ok()?;
+    let cfg = registry.dynamic_cfg.read().ok()?;
+    cfg.caip_registry.get(namespace).copied()
+}
+
+/// Returns the CAIP-2 namespaces supported by a specific SignatureScheme.
+pub fn signature_scheme_to_caip_namespaces(scheme: crate::crypto::SignatureScheme) -> Vec<String> {
+    let Ok(registry) = get_registry().read() else { return vec![]; };
+    let Ok(cfg) = registry.dynamic_cfg.read() else { return vec![]; };
+    cfg.caip_registry
+        .iter()
+        .filter_map(|(ns, &(sig_scheme, _))| {
+            if sig_scheme == scheme {
+                Some(ns.clone())
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 

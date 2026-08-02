@@ -19,8 +19,6 @@ pub mod nmt;
 pub mod registry;
 /// BGP router sync and WireGuard peering.
 pub mod bgp;
-/// Cross-manifold precompiles module.
-pub mod precompile;
 /// Reputation slashing and decay rules.
 pub mod slashing;
 /// Parallel execution stubs.
@@ -34,19 +32,19 @@ pub mod subset_election;
 
 /// `PageRank` KZG commitments.
 pub mod kzg;
-/// MetaLex organization management.
-pub mod metalex;
 /// Sync committee and BLS signature aggregation.
 pub mod sync_committee;
 /// Velocity telemetry and circuit breaker engine.
 pub mod velocity;
-/// SIL-3 Actuator Oracles & Heartbeat precompile 0xfe.
-pub mod actuator;
+// /// SIL-3 Actuator Oracles & Heartbeat precompile 0xfe.
+// pub mod actuator;
 /// Cross-manifold Actor system and Saga rollback engine.
 pub mod actor;
 /// Based meshing and succinct zkEVM proof broadcasting.
 pub mod based_mesh;
 /// RPC-to-IPFS archival pinning engine and daemon.
 pub mod archival;
+/// Hardware offloading abstraction layer.
+pub mod hw_offload;
 
 pub use pool::{FCFSOrdering, SovereignPoolBuilder};

@@ -4,7 +4,7 @@
 //! implementation (`LocalIpfsClusterBackend`). Resolves the CAP Theorem by converting ephemeral
 //! EIP-4844 / PeerDAS blobs into persistent Namespaced Merkle Trees (NMTs) pinned to our local cluster.
 
-use crate::based_mesh::BasedMeshPacket;
+use crate::based_mesh::BasedMeshWrapper;
 use crate::nmt::{NamespaceId, NamespaceMerkleTree, NmtLeaf};
 use alloy_primitives::keccak256;
 use std::collections::HashMap;
@@ -156,7 +156,7 @@ impl ArchivalStorageBackend for MockArchivalBackend {
 
 /// Automated RPC-to-IPFS archival daemon for sovereign node operators.
 ///
-/// Monitors local block execution and mempool for emitted `BasedMeshPacket` blobs,
+/// Monitors local block execution and mempool for emitted `BasedMeshWrapper` blobs,
 /// partitions them into Namespaced Merkle Trees (NMTs), and pins content-addressed CIDs
 /// before the ~18-day L1 blob pruning TTL expires.
 pub struct RpcIpfsArchivalDaemon {
@@ -176,14 +176,14 @@ impl RpcIpfsArchivalDaemon {
         }
     }
 
-    /// Archives a `BasedMeshPacket` by computing its NMT partition root and pinning it to IPFS.
+    /// Archives a `BasedMeshWrapper` by computing its NMT partition root and pinning it to IPFS.
     ///
     /// # Errors
     /// Returns an error if serialization or storage pinning fails.
-    pub fn archive_based_mesh_packet(&self, packet: &BasedMeshPacket) -> Result<String, String> {
+    pub fn archive_based_mesh_packet(&self, packet: &BasedMeshWrapper) -> Result<String, String> {
         let raw_bytes = packet
             .to_bytes()
-            .map_err(|e| format!("Failed to serialize BasedMeshPacket for archival: {e}"))?;
+            .map_err(|e| format!("Failed to serialize BasedMeshWrapper for archival: {e}"))?;
 
         // 1. Structure payload into a Namespaced Merkle Tree leaf
         let mut tree = NamespaceMerkleTree::new();
@@ -212,22 +212,55 @@ impl RpcIpfsArchivalDaemon {
         tracing::info!(
             source_manifold = packet.source_manifold_id,
             %cid,
-            "BasedMeshPacket archived and pinned to private IPFS cluster successfully"
+            "BasedMeshWrapper archived and pinned to private IPFS cluster successfully"
         );
 
         Ok(cid)
     }
 
-    /// Recovers and reconstructs a historical `BasedMeshPacket` from an archived IPFS CID.
+    /// Recovers and reconstructs a historical `BasedMeshWrapper` from an archived IPFS CID.
     ///
     /// Enables offline nodes or new network entrants to bootstrap trustlessly.
     ///
     /// # Errors
     /// Returns an error if the CID cannot be fetched or packet deserialization fails.
-    pub fn recover_packet(&self, cid: &str) -> Result<BasedMeshPacket, String> {
+    pub fn recover_packet(&self, cid: &str) -> Result<BasedMeshWrapper, String> {
         let raw_bytes = self.backend.fetch_blob(cid)?;
-        BasedMeshPacket::from_bytes(&raw_bytes)
-            .map_err(|e| format!("Failed to reconstruct BasedMeshPacket from CID '{cid}': {e}"))
+        BasedMeshWrapper::from_bytes(&raw_bytes)
+            .map_err(|e| format!("Failed to reconstruct BasedMeshWrapper from CID '{cid}': {e}"))
+    }
+
+    /// Archives an out-of-band stateless `AccountWitness` to the IPFS storage backend.
+    ///
+    /// # Errors
+    /// Returns an error if encoding or pinning fails.
+    pub fn archive_account_witness(&self, manifold_id: u64, witness: &crate::stateless::AccountWitness) -> Result<String, String> {
+        use scale::Encode;
+        let raw_bytes = witness.encode();
+        let cid = self.backend.pin_blob(manifold_id, &raw_bytes)?;
+
+        // Register CID under the manifold namespace
+        let mut guard = self
+            .pinned_cids
+            .lock()
+            .map_err(|_| "Failed to acquire lock on daemon CID registry")?;
+        guard
+            .entry(manifold_id)
+            .or_default()
+            .push(cid.clone());
+
+        Ok(cid)
+    }
+
+    /// Resolves and recovers an out-of-band `AccountWitness` from an IPFS CID.
+    ///
+    /// # Errors
+    /// Returns an error if the CID cannot be resolved or SCALE decoding fails.
+    pub fn resolve_account_witness(&self, cid: &str) -> Result<crate::stateless::AccountWitness, String> {
+        use scale::Decode;
+        let raw_bytes = self.backend.fetch_blob(cid)?;
+        crate::stateless::AccountWitness::decode(&mut &raw_bytes[..])
+            .map_err(|e| format!("Failed to decode AccountWitness from CID '{cid}': {e:?}"))
     }
 }
 
@@ -252,7 +285,7 @@ mod tests {
         let backend = Arc::new(MockArchivalBackend::new());
         let daemon = RpcIpfsArchivalDaemon::new(backend);
 
-        let packet = BasedMeshPacket::new(
+        let packet = BasedMeshWrapper::new(
             100,
             vec![200],
             B256::repeat_byte(0xcc),
@@ -273,5 +306,34 @@ mod tests {
         // Reconstruct historical packet from archival storage
         let recovered = daemon.recover_packet(&cid).unwrap();
         assert_eq!(packet, recovered);
+    }
+
+    #[test]
+    fn test_out_of_band_witness_resolution_mock_mode() {
+        use crate::stateless::AccountWitness;
+        use alloy_primitives::U256;
+
+        let backend = Arc::new(MockArchivalBackend::new());
+        let daemon = RpcIpfsArchivalDaemon::new(backend);
+
+        let witness = AccountWitness {
+            balance: U256::from(7_500_000),
+            nonce: 42,
+            code_hash: B256::repeat_byte(0xba),
+            code: b"somerevmbytecode".to_vec(),
+            quadrant_matrix: [0b11, 0b1000, 0, 0b10],
+        };
+
+        // Archive the witness
+        let cid = daemon.archive_account_witness(65001, &witness).unwrap();
+        assert!(cid.starts_with("mock_cid_"));
+
+        // Resolve the witness from IPFS/mock
+        let resolved = daemon.resolve_account_witness(&cid).unwrap();
+        assert_eq!(resolved.balance, witness.balance);
+        assert_eq!(resolved.nonce, witness.nonce);
+        assert_eq!(resolved.code_hash, witness.code_hash);
+        assert_eq!(resolved.code, witness.code);
+        assert_eq!(resolved.quadrant_matrix, witness.quadrant_matrix);
     }
 }

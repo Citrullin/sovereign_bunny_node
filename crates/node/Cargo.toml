@@ -8,6 +8,10 @@ authors.workspace = true
 name = "sovereign-reth"
 path = "src/main.rs"
 
+[[bin]]
+name = "did-cli"
+path = "src/did_cli.rs"
+
 [dependencies]
 tokio = { workspace = true }
 eyre = { workspace = true }
@@ -20,6 +24,13 @@ futures = { workspace = true }
 alloy-primitives = { workspace = true }
 reqwest = { version = "0.12", features = ["json"] }
 alloy-consensus = { workspace = true }
+alloy-rlp = "0.3"
+k256 = { workspace = true }
+blake3 = { workspace = true }
+bip39 = "2.0.0"
+bip32 = "0.5.1"
+alloy-signer-local = "2.1.1"
+alloy-network = "2.1.1"
 
 
 tiny-keccak = { workspace = true }
@@ -47,3 +58,4 @@ toml = { workspace = true }
 bs58 = { workspace = true }
 ed25519-dalek = { workspace = true }
 did-peer = { workspace = true }
+jsonrpsee = { version = "0.26.0", features = ["server", "macros"] }

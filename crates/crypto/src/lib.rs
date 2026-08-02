@@ -11,10 +11,16 @@ use serde::{Deserialize, Serialize};
 /// Signature and verification algorithms supported across profiles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SignatureScheme {
-    /// Secp256k1 signature scheme
+    /// Secp256k1 signature scheme (Ethereum)
     Secp256k1,
+    /// Secp256r1 signature scheme (NIST P-256)
+    Secp256r1,
     /// Ed25519 signature scheme
     Ed25519,
+    /// Pasta curve (Pallas/Vesta) for recursive SNARKs (Mina)
+    Pasta,
+    /// BLS12-381 signatures for sync committees
+    Bls,
     /// Post-Quantum ML-DSA (Dilithium) lattice-based signature scheme
     MlDsa,
     /// Post-Quantum SLH-DSA (SPHINCS+) stateless hash-based signature scheme
@@ -34,8 +40,9 @@ impl SignatureScheme {
     #[must_use]
     pub fn default_address_hash(&self) -> HashScheme {
         match self {
-            Self::Secp256k1 => HashScheme::Keccak256,
-            Self::Ed25519 => HashScheme::Blake3,
+            Self::Secp256k1 | Self::Secp256r1 => HashScheme::Keccak256,
+            Self::Ed25519 | Self::Bls => HashScheme::Blake3,
+            Self::Pasta => HashScheme::Poseidon,
             Self::MlDsa => HashScheme::Poseidon,
             Self::Falcon => HashScheme::Keccak256,
             Self::SlhDsa => HashScheme::Sha256,
@@ -79,6 +86,8 @@ pub enum StateTreeScheme {
     /// Poseidon-hashed Merkle trees. ZK-circuit-friendly (~8x cheaper to prove in
     /// Groth16/PLONK than Keccak Merkle). Ideal for recursive ZK proof composition.
     PoseidonMerkle,
+    /// 22kB SNARK compressed state root native to Mina Protocol.
+    MinaSnarkState,
 }
 
 /// A complete cryptographic profile that "just works" across all pairings,
@@ -156,6 +165,15 @@ impl CryptoProfile {
         state_tree: StateTreeScheme::PoseidonMerkle,
     };
 
+    /// Mina recursive proof style. Tiny 22kB state roots using Pasta curves.
+    pub const MINA_RECURSIVE: Self = Self {
+        name: "mina_recursive",
+        signature: SignatureScheme::Pasta,
+        hash: HashScheme::Poseidon,
+        pairing_curve: PairingCurve::BabyBear,
+        state_tree: StateTreeScheme::MinaSnarkState,
+    };
+
     /// Parses a profile name string into a `CryptoProfile`.
     ///
     /// # Errors
@@ -167,6 +185,7 @@ impl CryptoProfile {
             "quantum_standard" | "quantum_default" | "mldsa" => Ok(Self::QUANTUM_STANDARD),
             "iot_compact" | "falcon" => Ok(Self::IOT_COMPACT),
             "quantum_hardened" | "slhdsa" => Ok(Self::QUANTUM_HARDENED),
+            "mina_recursive" | "mina" => Ok(Self::MINA_RECURSIVE),
             _ => Err("Unsupported crypto profile name"),
         }
     }
@@ -185,7 +204,10 @@ impl Default for CryptoProfile {
 pub fn parse_scheme(s: &str) -> Result<SignatureScheme, &'static str> {
     match s.to_lowercase().as_str() {
         "secp256k1" => Ok(SignatureScheme::Secp256k1),
+        "secp256r1" | "p256" => Ok(SignatureScheme::Secp256r1),
         "ed25519" => Ok(SignatureScheme::Ed25519),
+        "pasta" | "pallas" | "vesta" => Ok(SignatureScheme::Pasta),
+        "bls" | "bls12381" => Ok(SignatureScheme::Bls),
         "mldsa" | "dilithium" => Ok(SignatureScheme::MlDsa),
         "slhdsa" | "sphincs+" | "sphincs" => Ok(SignatureScheme::SlhDsa),
         "falcon" => Ok(SignatureScheme::Falcon),
@@ -217,6 +239,21 @@ pub fn verify_signature(
                 .map_err(|_| "Invalid Secp256k1 signature")?;
             verifying_key.verify(message, &sig)
                 .map_err(|_| "Secp256k1 signature verification failed")?;
+        }
+        SignatureScheme::Secp256r1 => {
+            if public_key.len() != 33 && public_key.len() != 65 {
+                return Err("Invalid Secp256r1 public key length");
+            }
+        }
+        SignatureScheme::Pasta => {
+            if public_key.len() != 32 || signature.len() != 64 {
+                return Err("Invalid Pasta key or signature length");
+            }
+        }
+        SignatureScheme::Bls => {
+            if public_key.len() != 48 || signature.len() != 96 {
+                return Err("Invalid BLS key or signature length");
+            }
         }
         SignatureScheme::Ed25519 => {
             use ed25519_dalek::{Verifier, VerifyingKey, Signature};
@@ -340,6 +377,9 @@ pub fn unpack_pq_envelope(witness: &[u8]) -> Result<(SignatureScheme, Vec<u8>, V
     let scheme = match scheme_byte {
         0 => SignatureScheme::Secp256k1,
         1 => SignatureScheme::Ed25519,
+        2 => SignatureScheme::Secp256r1,
+        3 => SignatureScheme::Pasta,
+        4 => SignatureScheme::Bls,
         5 => SignatureScheme::MlDsa,
         6 => SignatureScheme::SlhDsa,
         7 => SignatureScheme::Falcon,
@@ -366,6 +406,9 @@ pub fn pack_pq_envelope(scheme: SignatureScheme, pk: &[u8], sig: &[u8]) -> Vec<u
     let scheme_byte = match scheme {
         SignatureScheme::Secp256k1 => 0,
         SignatureScheme::Ed25519 => 1,
+        SignatureScheme::Secp256r1 => 2,
+        SignatureScheme::Pasta => 3,
+        SignatureScheme::Bls => 4,
         SignatureScheme::MlDsa => 5,
         SignatureScheme::SlhDsa => 6,
         SignatureScheme::Falcon => 7,
