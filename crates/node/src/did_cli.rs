@@ -150,6 +150,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     derived.copy_from_slice(&hash[12..32]);
     let derived_addr = alloy_primitives::Address::from(derived);
     println!("   - EVM Address: {:?}", derived_addr);
+    println!("   - Secp256k1 Private Key: 0x{}", hex::encode(secp_child.private_key().to_bytes()));
 
     // Derive Ed25519 (Solana path: m/44'/501'/0'/0/0)
     let ed_path: bip32::DerivationPath = "m/44'/501'/0'/0/0".parse()?;

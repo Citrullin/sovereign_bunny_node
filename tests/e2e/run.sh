@@ -18,11 +18,17 @@ cleanup() {
         kill "$NODE_PID" || true
         wait "$NODE_PID" 2>/dev/null || true
     fi
+    if [ -n "${TEST_DB:-}" ]; then
+        rm -rf "$TEST_DB" || true
+    fi
 }
 trap cleanup EXIT
 
 echo "🚀 Launching Sovereign-Reth node in dev mode..."
-./target/debug/sovereign-reth node --dev --http --http.port 8545 > node_e2e.log 2>&1 &
+TEST_DB="/tmp/sovereign-reth-e2e-db-$(date +%s)"
+rm -rf "$TEST_DB"
+mkdir -p "$TEST_DB"
+./target/debug/sovereign-reth node --dev --datadir "$TEST_DB" --http --http.port 8545 > node_e2e.log 2>&1 &
 NODE_PID=$!
 
 echo "⏳ Waiting for RPC HTTP server to start on port 8545..."
@@ -44,5 +50,6 @@ done
 echo "✅ Node is active! Running E2E Wallet Integration Tests..."
 SOVEREIGN_RPC_URL="http://127.0.0.1:8545" node tests/e2e/wallet_setup_snap.js
 SOVEREIGN_RPC_URL="http://127.0.0.1:8545" node tests/e2e/wallet_tests.js
+SOVEREIGN_RPC_URL="http://127.0.0.1:8545" node tests/e2e/native_history_viem_test.mjs
 
 echo "🎉 E2E Tests completed successfully!"

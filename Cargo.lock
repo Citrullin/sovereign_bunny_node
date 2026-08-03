@@ -11027,6 +11027,7 @@ name = "sovereign-identity"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
+ "bs58",
  "did-peer",
  "ed25519-dalek 3.0.0",
  "fips204",

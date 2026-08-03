@@ -360,17 +360,8 @@ pub fn validate_implicit_state_block(
                 return Err("Validator signature verification failed");
             }
 
-            // Derive address using the scheme's mapping
-            let hash_scheme = match scheme {
-                crate::crypto::SignatureScheme::Secp256k1 => crate::crypto::HashScheme::Keccak256,
-                crate::crypto::SignatureScheme::Secp256r1 => crate::crypto::HashScheme::Keccak256,
-                crate::crypto::SignatureScheme::Ed25519 => crate::crypto::HashScheme::Blake3,
-                crate::crypto::SignatureScheme::Pasta => crate::crypto::HashScheme::Poseidon,
-                crate::crypto::SignatureScheme::Bls => crate::crypto::HashScheme::Blake3,
-                crate::crypto::SignatureScheme::MlDsa => crate::crypto::HashScheme::Poseidon,
-                crate::crypto::SignatureScheme::Falcon => crate::crypto::HashScheme::Keccak256,
-                crate::crypto::SignatureScheme::SlhDsa => crate::crypto::HashScheme::Sha256,
-            };
+            // Derive address using the scheme's default address hash mapping
+            let hash_scheme = scheme.default_address_hash();
             let derived_addr = alloy_primitives::Address::from(crate::crypto::derive_address(hash_scheme, &pk));
 
             // Ensure the public key belongs to an active validator

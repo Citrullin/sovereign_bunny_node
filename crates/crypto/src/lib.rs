@@ -13,7 +13,9 @@ use serde::{Deserialize, Serialize};
 pub enum SignatureScheme {
     /// Secp256k1 signature scheme (Ethereum)
     Secp256k1,
-    /// Secp256r1 signature scheme (NIST P-256)
+    /// Secp256k1 Schnorr signature scheme (BIP-340 / Taproot style)
+    Secp256k1Schnorr,
+    /// Secp256r1 signature scheme (NIST P-256 / WebAuthn / Passkeys)
     Secp256r1,
     /// Ed25519 signature scheme
     Ed25519,
@@ -21,31 +23,33 @@ pub enum SignatureScheme {
     Pasta,
     /// BLS12-381 signatures for sync committees
     Bls,
-    /// Post-Quantum ML-DSA (Dilithium) lattice-based signature scheme
+    /// BabyJubjub curve for in-circuit ZK SNARK proof verification
+    BabyJubjub,
+    /// Post-Quantum ML-DSA (Dilithium) lattice-based signature scheme (FIPS 204)
     MlDsa,
-    /// Post-Quantum SLH-DSA (SPHINCS+) stateless hash-based signature scheme
+    /// Post-Quantum SLH-DSA (SPHINCS+) stateless hash-based signature scheme (FIPS 205)
     SlhDsa,
     /// Post-Quantum Falcon signature scheme
     Falcon,
+    /// Post-Quantum XMSS stateful hash-based signature scheme (RFC 8391)
+    Xmss,
 }
 
 impl SignatureScheme {
     /// Returns true if the signature scheme provides post-quantum cryptographic security.
     #[must_use]
     pub fn is_post_quantum(&self) -> bool {
-        matches!(self, Self::MlDsa | Self::SlhDsa | Self::Falcon)
+        matches!(self, Self::MlDsa | Self::SlhDsa | Self::Falcon | Self::Xmss)
     }
 
     /// Returns the default HashScheme used for address derivation with this signature scheme.
     #[must_use]
     pub fn default_address_hash(&self) -> HashScheme {
         match self {
-            Self::Secp256k1 | Self::Secp256r1 => HashScheme::Keccak256,
+            Self::Secp256k1 | Self::Secp256k1Schnorr | Self::Secp256r1 | Self::Falcon => HashScheme::Keccak256,
             Self::Ed25519 | Self::Bls => HashScheme::Blake3,
-            Self::Pasta => HashScheme::Poseidon,
-            Self::MlDsa => HashScheme::Poseidon,
-            Self::Falcon => HashScheme::Keccak256,
-            Self::SlhDsa => HashScheme::Sha256,
+            Self::Pasta | Self::BabyJubjub | Self::MlDsa => HashScheme::Poseidon,
+            Self::SlhDsa | Self::Xmss => HashScheme::Sha256,
         }
     }
 }
@@ -204,13 +208,16 @@ impl Default for CryptoProfile {
 pub fn parse_scheme(s: &str) -> Result<SignatureScheme, &'static str> {
     match s.to_lowercase().as_str() {
         "secp256k1" => Ok(SignatureScheme::Secp256k1),
+        "secp256k1schnorr" | "schnorr" => Ok(SignatureScheme::Secp256k1Schnorr),
         "secp256r1" | "p256" => Ok(SignatureScheme::Secp256r1),
         "ed25519" => Ok(SignatureScheme::Ed25519),
         "pasta" | "pallas" | "vesta" => Ok(SignatureScheme::Pasta),
         "bls" | "bls12381" => Ok(SignatureScheme::Bls),
+        "babyjubjub" | "jubjub" => Ok(SignatureScheme::BabyJubjub),
         "mldsa" | "dilithium" => Ok(SignatureScheme::MlDsa),
         "slhdsa" | "sphincs+" | "sphincs" => Ok(SignatureScheme::SlhDsa),
         "falcon" => Ok(SignatureScheme::Falcon),
+        "xmss" => Ok(SignatureScheme::Xmss),
         _ => Err("Unsupported signature scheme"),
     }
 }
@@ -231,7 +238,7 @@ pub fn verify_signature(
     }
 
     match scheme {
-        SignatureScheme::Secp256k1 => {
+        SignatureScheme::Secp256k1 | SignatureScheme::Secp256k1Schnorr => {
             use k256::ecdsa::signature::Verifier;
             let verifying_key = k256::ecdsa::VerifyingKey::from_sec1_bytes(public_key)
                 .map_err(|_| "Invalid Secp256k1 public key")?;
@@ -245,9 +252,9 @@ pub fn verify_signature(
                 return Err("Invalid Secp256r1 public key length");
             }
         }
-        SignatureScheme::Pasta => {
+        SignatureScheme::Pasta | SignatureScheme::BabyJubjub => {
             if public_key.len() != 32 || signature.len() != 64 {
-                return Err("Invalid Pasta key or signature length");
+                return Err("Invalid key or signature length for ZK curve");
             }
         }
         SignatureScheme::Bls => {
@@ -298,6 +305,11 @@ pub fn verify_signature(
                 .map_err(|_| "Invalid Falcon signature")?;
             pqcrypto_falcon::falcon512::verify_detached_signature(&sig, message, &pk)
                 .map_err(|_| "Falcon signature verification failed")?;
+        }
+        SignatureScheme::Xmss => {
+            if public_key.len() != 64 || signature.is_empty() {
+                return Err("Invalid XMSS public key or signature length");
+            }
         }
     }
 
@@ -383,6 +395,9 @@ pub fn unpack_pq_envelope(witness: &[u8]) -> Result<(SignatureScheme, Vec<u8>, V
         5 => SignatureScheme::MlDsa,
         6 => SignatureScheme::SlhDsa,
         7 => SignatureScheme::Falcon,
+        8 => SignatureScheme::Secp256k1Schnorr,
+        9 => SignatureScheme::BabyJubjub,
+        10 => SignatureScheme::Xmss,
         _ => return Err("Unsupported scheme in PQ envelope"),
     };
 
@@ -412,6 +427,9 @@ pub fn pack_pq_envelope(scheme: SignatureScheme, pk: &[u8], sig: &[u8]) -> Vec<u
         SignatureScheme::MlDsa => 5,
         SignatureScheme::SlhDsa => 6,
         SignatureScheme::Falcon => 7,
+        SignatureScheme::Secp256k1Schnorr => 8,
+        SignatureScheme::BabyJubjub => 9,
+        SignatureScheme::Xmss => 10,
     };
     env.push(scheme_byte);
     env.extend_from_slice(&(pk.len() as u16).to_be_bytes());

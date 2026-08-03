@@ -9,6 +9,7 @@ alloy-primitives = { workspace = true }
 did-peer = { workspace = true }
 siwe = { workspace = true }
 k256 = { workspace = true }
+bs58 = { workspace = true }
 ed25519-dalek = { workspace = true }
 tokio = { workspace = true }
 sovereign-crypto = { path = "../crypto" }

@@ -177,7 +177,10 @@ async function runTests() {
   const valueToSend = 1000000000000000000n; // 1 ETH in wei
   const gasLimit = 21000;
   const gasPrice = 1000000000; // 1 gwei
-  const chainId = 13371337;
+  
+  const resChainId = await rpcCall('eth_chainId', []);
+  const chainId = parseInt(resChainId.result, 16);
+  console.log(`  Detected Chain ID: ${chainId}`);
 
   const cmd = `"${didCliPath}" sign-tx --private-key ${SENDER_A_PK} --to ${RECEIVER_B} --value ${valueToSend} --nonce ${initialSenderNonce} --gas-limit ${gasLimit} --gas-price ${gasPrice} --chain-id ${chainId}`;
   const signedRawTx = execSync(cmd).toString().trim();
@@ -185,10 +188,12 @@ async function runTests() {
 
   // Submit the dynamic transaction (Sender)
   const resSendTx = await rpcCall('eth_sendRawTransaction', [signedRawTx]);
-  console.log('  DEBUG resSendTx response:', JSON.stringify(resSendTx));
   const txHash = resSendTx.result;
   assert.ok(txHash && txHash.startsWith('0x'), "Must return valid transaction hash");
   console.log(`  Sent transaction hash: ${txHash}`);
+
+  console.log('  ⏳ Simulating real-world time passing (waiting 5 seconds)...');
+  await new Promise(resolve => setTimeout(resolve, 5000));
 
   // Query updated balance for sender (should be less than initialSenderBalance)
   const resNewBal = await rpcCall('eth_getBalance', [SENDER_A, 'latest']);
@@ -196,15 +201,29 @@ async function runTests() {
   assert.ok(newSenderBalance < initialSenderBalance, "Sender balance must have decreased");
   console.log(`  Updated sender balance checked successfully: ${resNewBal.result} wei`);
 
-  console.log('  ⏳ Simulating real-world time passing (waiting 5 seconds)...');
-  await new Promise(resolve => setTimeout(resolve, 5000));
-
-  // The receiver wallet comes online and checks the latest block
+  // The receiver wallet comes online and checks the latest block using multiple query formats (like padded hex)
   console.log('  🔍 Receiver wallet comes online and scans the latest block (eth_getBlockByNumber)...');
-  const resBlock = await rpcCall('eth_getBlockByNumber', ['latest', false]);
-  assert.ok(resBlock.result, "Block should not be null");
-  assert.ok(resBlock.result.transactions.includes(txHash), "Transaction hash must be present in the block");
-  console.log('  ✅ Receiver successfully saw the transaction in the latest block.');
+  
+  // Format A: "latest"
+  const resBlockLatest = await rpcCall('eth_getBlockByNumber', ['latest', false]);
+  assert.ok(resBlockLatest.result, "Block 'latest' should not be null");
+  assert.ok(resBlockLatest.result.transactions.includes(txHash), "Transaction hash must be present in the block 'latest'");
+  console.log('  ✅ Receiver successfully saw the transaction in the latest block using "latest".');
+
+  // Format B: Unpadded hex block number
+  const blockNumHex = resBlockLatest.result.number; // e.g. "0x1"
+  const resBlockUnpadded = await rpcCall('eth_getBlockByNumber', [blockNumHex, false]);
+  assert.ok(resBlockUnpadded.result, `Block ${blockNumHex} should not be null`);
+  assert.ok(resBlockUnpadded.result.transactions.includes(txHash), `Transaction hash must be present in block ${blockNumHex}`);
+  console.log(`  ✅ Receiver successfully saw the transaction using unpadded block number: ${blockNumHex}`);
+
+  // Format C: Padded hex block number
+  const cleanHex = blockNumHex.replace('0x', '');
+  const paddedHex = '0x' + cleanHex.padStart(8, '0'); // e.g. "0x00000001"
+  const resBlockPadded = await rpcCall('eth_getBlockByNumber', [paddedHex, false]);
+  assert.ok(resBlockPadded.result, `Block ${paddedHex} should not be null`);
+  assert.ok(resBlockPadded.result.transactions.includes(txHash), `Transaction hash must be present in block ${paddedHex}`);
+  console.log(`  ✅ Receiver successfully saw the transaction using padded block number: ${paddedHex}`);
 
   // Receiver fetches transaction details
   console.log('  🔍 Receiver wallet fetches transaction details (eth_getTransactionByHash)...');

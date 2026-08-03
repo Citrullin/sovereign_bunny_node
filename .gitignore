@@ -1,6 +1,7 @@
 /target
 /db
 /contracts/node_modules
+tests/e2e/node_modules
 /contracts/out
 genesis.json
 /db1
