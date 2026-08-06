@@ -252,7 +252,8 @@ fn main() {
                 .await?;
             
             // Start the CAIP RPC proxy
-            let _ = tokio::spawn(caip_rpc::run_proxy(port, reth_port));
+            let chain_id = handle.node.chain_spec().chain.id();
+            let _ = tokio::spawn(caip_rpc::run_proxy(port, reth_port, chain_id));
 
             handle.wait_for_node_exit().await
         } else {
@@ -269,7 +270,8 @@ fn main() {
                 .await?;
             
             // Start the CAIP RPC proxy
-            let _ = tokio::spawn(caip_rpc::run_proxy(port, reth_port));
+            let chain_id = handle.node.chain_spec().chain.id();
+            let _ = tokio::spawn(caip_rpc::run_proxy(port, reth_port, chain_id));
 
             handle.wait_for_node_exit().await
         }

@@ -2,20 +2,96 @@
  * wallet_setup_snap.js
  *
  * Mock Wallet Extension / MetaMask Snap simulation script.
- * Demonstrates:
- * 1. Master seed entropy definition.
- * 2. SLIP-0010 / BIP-32 multi-curve key derivation (Secp256k1, Ed25519, BLS).
- * 3. Compiling keys into a universal `did:peer` document.
- * 4. Registering the DID via `sovereign_registerDid` to satisfy prerequisites.
- * 5. Attempting CAIP sessions with the registered DID header.
  */
 
 const assert = require('assert');
+const crypto = require('crypto');
+const { secp256k1 } = require('@noble/curves/secp256k1');
+const { keccak256 } = require('viem');
 
 const RPC_URL = process.env.SOVEREIGN_RPC_URL || 'http://localhost:8545';
 
 // Mock master seed (256-bit entropy)
 const MASTER_SEED = '0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef';
+
+// Base58 encoder
+const ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+function encodeBase58(buffer) {
+  const digits = [0];
+  for (let i = 0; i < buffer.length; i++) {
+    let carry = buffer[i];
+    for (let j = 0; j < digits.length; j++) {
+      carry += digits[j] * 256;
+      digits[j] = carry % 58;
+      carry = Math.floor(carry / 58);
+    }
+    while (carry > 0) {
+      digits.push(carry % 58);
+      carry = Math.floor(carry / 58);
+    }
+  }
+  for (let i = 0; i < buffer.length && buffer[i] === 0; i++) {
+    digits.push(0);
+  }
+  return digits.reverse().map(digit => ALPHABET[digit]).join('');
+}
+
+function generatePeer4Did(privateKeyHex, includeAll = true) {
+  const privateKeyBytes = Buffer.from(privateKeyHex.replace('0x', ''), 'hex');
+  const secpPubBytes = Buffer.from(secp256k1.ProjectivePoint.BASE.multiply(BigInt('0x' + privateKeyHex.replace('0x', ''))).toRawBytes(true));
+  
+  const secpMulticodec = Buffer.concat([Buffer.from([0xe7, 0x01]), secpPubBytes]);
+  const secpMultibase = 'z' + encodeBase58(secpMulticodec);
+
+  const verificationMethod = [
+    { "id": "#key-secp256k1", "type": "EcdsaSecp256k1VerificationKey2019", "publicKeyMultibase": secpMultibase }
+  ];
+
+  if (includeAll) {
+    const dummyEd = 'z' + encodeBase58(Buffer.concat([Buffer.from([0xed, 0x01]), Buffer.alloc(32)]));
+    const dummyBls = 'z' + encodeBase58(Buffer.concat([Buffer.from([0xea, 0x01]), Buffer.alloc(48)]));
+    const dummyMl = 'z' + encodeBase58(Buffer.concat([Buffer.from([0x93, 0x01]), Buffer.alloc(32)]));
+    const dummySlh = 'z' + encodeBase58(Buffer.concat([Buffer.from([0x94, 0x01]), Buffer.alloc(32)]));
+    const dummyFalcon = 'z' + encodeBase58(Buffer.concat([Buffer.from([0x92, 0x01]), Buffer.alloc(32)]));
+    const dummyXmss = 'z' + encodeBase58(Buffer.concat([Buffer.from([0x95, 0x01]), Buffer.alloc(32)]));
+
+    verificationMethod.push(
+      { "id": "#key-ed25519", "type": "Ed25519VerificationKey2020", "publicKeyMultibase": dummyEd },
+      { "id": "#key-bls", "type": "Bls12381G1Key2020", "publicKeyMultibase": dummyBls },
+      { "id": "#key-mldsa", "type": "MlDsa65VerificationKey2024", "publicKeyMultibase": dummyMl },
+      { "id": "#key-slhdsa", "type": "SlhDsaSha2128fVerificationKey2024", "publicKeyMultibase": dummySlh },
+      { "id": "#key-falcon", "type": "Falcon512VerificationKey2024", "publicKeyMultibase": dummyFalcon },
+      { "id": "#key-xmss", "type": "XmssSha2256VerificationKey2024", "publicKeyMultibase": dummyXmss }
+    );
+  }
+
+  const didDocJson = {
+    "verificationMethod": verificationMethod
+  };
+
+  const jsonStr = JSON.stringify(didDocJson);
+  const encoded = Buffer.concat([Buffer.from([0x80, 0x04]), Buffer.from(jsonStr)]);
+  const docComp = 'z' + encodeBase58(encoded);
+
+  const hashBytes = crypto.createHash('sha256').update(docComp).digest();
+  const prefixed = Buffer.concat([Buffer.from([0x12, 0x20]), hashBytes]);
+  const hashComp = 'z' + encodeBase58(prefixed);
+
+  return `did:peer:4${hashComp}:${docComp}`;
+}
+
+function signRegistration(didUri, nonce, privateKeyHex) {
+  const message = `registerDid:${didUri}:${nonce}`;
+  const hash = keccak256(Buffer.from(message));
+  const privateKeyBytes = Buffer.from(privateKeyHex.replace('0x', ''), 'hex');
+  const sig = secp256k1.sign(Buffer.from(hash.replace('0x', ''), 'hex'), privateKeyBytes);
+  
+  const rBytes = Buffer.from(sig.r.toString(16).padStart(64, '0'), 'hex');
+  const sBytes = Buffer.from(sig.s.toString(16).padStart(64, '0'), 'hex');
+  const vByte = Buffer.from([sig.recovery]);
+  const sigBytes = Buffer.concat([rBytes, sBytes, vByte]);
+  return '0x' + sigBytes.toString('hex');
+}
 
 async function rpcCall(method, params, headers = {}) {
   const response = await fetch(RPC_URL, {
@@ -43,17 +119,9 @@ async function runOnboarding() {
   // 1. Derive multi-curve key parameters (mock BIP-32 / SLIP-0010)
   console.log(`🔑 Master Seed: ${MASTER_SEED}`);
   console.log('🌱 Deriving curve keys:');
-  console.log('   - m/44\'/60\'/0\'/0/0 (secp256k1) -> EVM Address');
-  console.log('   - m/44\'/501\'/0\'/0\' (ed25519) -> Solana Pubkey');
-  console.log('   - m/44\'/1234\'/0\'/0\' (bls12-381) -> Committee Pubkey');
-  console.log('   - m/44\'/9999\'/0\'/0\' (mldsa-nist) -> Post-Quantum Ml-Dsa Pubkey');
-  console.log('   - m/44\'/9999\'/0\'/1\' (slhdsa-nist) -> Post-Quantum Slh-Dsa Pubkey');
-  console.log('   - m/44\'/9999\'/0\'/2\' (falcon-nist) -> Post-Quantum Falcon Pubkey');
 
-  // 1. Single-key DID (only secp256k1, missing required ed25519)
-  const singleKeyDid = 'did:peer:2.VzQ3shok17vjUvJgqG3Yme5fQwQDndx8C5Jea95D4A8YnUFs2t';
-  // 2. Fully-provisioned multi-key DID containing both curves
-  const multiKeyDid = 'did:peer:2.VzQ3shok17vjUvJgqG3Yme5fQwQDndx8C5Jea95D4A8YnUFs2t.Vz6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK';
+  const singleKeyDid = generatePeer4Did(MASTER_SEED, false);
+  const multiKeyDid = generatePeer4Did(MASTER_SEED, true);
   console.log(`📝 Single-Key DID: ${singleKeyDid}`);
   console.log(`📝 Multi-Key DID:  ${multiKeyDid}`);
 
@@ -71,7 +139,9 @@ async function runOnboarding() {
 
   // Test B: Attempt to register a DID missing required keys (should FAIL)
   console.log('\n🧪 Testing Connection Prerequisite: Registering single-key DID missing Ed25519 (Expected to fail)...');
-  const resRegFail = await rpcCall('sovereign_registerDid', [singleKeyDid]);
+  const nonceFail = Date.now();
+  const sigFail = signRegistration(singleKeyDid, nonceFail, MASTER_SEED);
+  const resRegFail = await rpcCall('sovereign_registerDid', [singleKeyDid, nonceFail, sigFail]);
   assert.ok(resRegFail.error);
   assert.strictEqual(resRegFail.error.code, -32603);
   assert.ok(resRegFail.error.message.includes('Sovereign DID Error: DID is missing required verification keys'));
@@ -79,7 +149,9 @@ async function runOnboarding() {
 
   // Test C: Register a fully provisioned DID (should SUCCEED)
   console.log('\n🧪 Registering multi-key DID on-chain (sovereign_registerDid)...');
-  const resReg = await rpcCall('sovereign_registerDid', [multiKeyDid]);
+  const nonceSuccess = Date.now();
+  const sigSuccess = signRegistration(multiKeyDid, nonceSuccess, MASTER_SEED);
+  const resReg = await rpcCall('sovereign_registerDid', [multiKeyDid, nonceSuccess, sigSuccess]);
   assert.ok(resReg.result);
   assert.strictEqual(resReg.result.status, 'success');
   const mappedAddress = resReg.result.address;

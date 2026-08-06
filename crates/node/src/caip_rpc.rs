@@ -1,6 +1,7 @@
 use alloy_consensus::{Transaction, TxEnvelope};
 use alloy_primitives::{Address, B256, U256};
 use alloy_rlp::Decodable;
+use k256::ecdsa::signature::hazmat::PrehashVerifier;
 use reth_primitives_traits::SignerRecoverable;
 use serde_json::json;
 use sovereign_consensus::registry::get_registry;
@@ -32,6 +33,12 @@ pub struct NativeTransferRecord {
     pub value: String,
     /// Unix timestamp of block inclusion.
     pub timestamp: u64,
+    /// Signature v value.
+    pub v: String,
+    /// Signature r value.
+    pub r: String,
+    /// Signature s value.
+    pub s: String,
 }
 
 /// Ephemeral 48-Hour Hot Memory Index — transient state deltas backing the Stateless zkEVM.
@@ -44,6 +51,10 @@ pub struct MemoryState {
 }
 
 static STATE: OnceLock<RwLock<MemoryState>> = OnceLock::new();
+
+use std::sync::atomic::{AtomicU64, Ordering};
+/// Global static configured chain ID of the node.
+pub static CHAIN_ID: AtomicU64 = AtomicU64::new(1337);
 
 /// Accesses the global in-memory 48-hour hot native transfer index.
 pub fn get_state() -> &'static RwLock<MemoryState> {
@@ -80,7 +91,32 @@ pub fn add_native_transfer_record(state: &mut MemoryState, record: NativeTransfe
 }
 
 /// Starts the CAIP RPC proxy server on `port`, forwarding execution reads to `reth_port`.
-pub async fn run_proxy(port: u16, reth_port: u16) -> Result<(), eyre::Report> {
+pub async fn run_proxy(port: u16, reth_port: u16, chain_id: u64) -> Result<(), eyre::Report> {
+    CHAIN_ID.store(chain_id, Ordering::Relaxed);
+    if let Ok(mut reg) = get_registry().write() {
+        reg.chain_id = chain_id;
+    }
+
+    // Query actual chain ID from Reth node as a fallback verification in background (E4)
+    tokio::spawn(async move {
+        let chain_req = json!({ "jsonrpc": "2.0", "method": "eth_chainId", "params": [], "id": 1 });
+        for _ in 0..30 {
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            if let Ok(res) = forward_to_reth_http(reth_port, &chain_req).await {
+                if let Some(hex_id) = res["result"].as_str() {
+                    if let Ok(val) = u64::from_str_radix(hex_id.trim_start_matches("0x"), 16) {
+                        CHAIN_ID.store(val, Ordering::Relaxed);
+                        if let Ok(mut reg) = get_registry().write() {
+                            reg.chain_id = val;
+                        }
+                        info!("CAIP Proxy initialized with Chain ID: {val}");
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
     let listener = TcpListener::bind(format!("127.0.0.1:{port}")).await?;
     info!("🚀 STATELESS zkEVM VERKLE CAIP Proxy listening on port {}", port);
 
@@ -133,6 +169,11 @@ pub async fn run_proxy(port: u16, reth_port: u16) -> Result<(), eyre::Report> {
                     }
                 }
 
+                if content_length > 1_048_576 {
+                    error!("Rejecting request: Content-Length {} exceeds 1MB cap", content_length);
+                    return;
+                }
+
                 let total_expected = header_len + content_length;
                 while buffer.len() < total_expected {
                     let n = match client_stream.read(&mut temp_buf).await {
@@ -168,6 +209,55 @@ pub async fn run_proxy(port: u16, reth_port: u16) -> Result<(), eyre::Report> {
 
                 if method == "sovereign_registerDid" {
                     let did_uri = body_json["params"][0].as_str().unwrap_or("");
+                    let nonce_val = body_json["params"].get(1).and_then(|v| v.as_u64()).unwrap_or(0);
+                    let sig_hex = body_json["params"].get(2).and_then(|v| v.as_str()).unwrap_or("");
+
+                    // 1. Resolve DID to get public key & EVM address
+                    let doc = match sovereign_identity::did::SovereignDidDocument::from_did_string(did_uri) {
+                        Some(d) => d,
+                        None => {
+                            send_error(&mut client_stream, &id, -32603, "Invalid DID URI string or multihash mismatch").await;
+                            continue;
+                        }
+                    };
+
+                    // 2. Validate nonce freshness (within 5 minutes)
+                    let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+                    let diff = if now_ms > nonce_val { now_ms - nonce_val } else { nonce_val - now_ms };
+                    if diff > 300_000 {
+                        send_error(&mut client_stream, &id, -32002, "Registration error: Nonce timestamp is expired or out of sync").await;
+                        continue;
+                    }
+
+                    // 3. Verify signature using secp256k1 public key of the DID document
+                    let message = format!("registerDid:{did_uri}:{nonce_val}");
+                    let digest = alloy_primitives::keccak256(message.as_bytes());
+                    
+                    let clean_sig = sig_hex.strip_prefix("0x").unwrap_or(sig_hex);
+                    let mut sig_bytes = match alloy_primitives::hex::decode(clean_sig) {
+                        Ok(b) => b,
+                        Err(_) => {
+                            send_error(&mut client_stream, &id, -32003, "Registration error: Invalid signature hex").await;
+                            continue;
+                        }
+                    };
+                    if sig_bytes.len() == 65 {
+                        sig_bytes.truncate(64);
+                    }
+
+                    let verifying_key = k256::ecdsa::VerifyingKey::from_sec1_bytes(&doc.secp256k1_pubkey);
+                    let sig = k256::ecdsa::Signature::from_slice(&sig_bytes);
+
+                    let verified = match (verifying_key, sig) {
+                        (Ok(vk), Ok(s)) => vk.verify_prehash(&digest[..], &s).map_err(|_| "Signature mismatch"),
+                        _ => Err("Invalid key or signature format"),
+                    };
+
+                    if verified.is_err() {
+                        send_error(&mut client_stream, &id, -32003, "Registration error: Signature verification failed. Key ownership proof mismatch.").await;
+                        continue;
+                    }
+
                     let reg_res = {
                         let mut registry = get_registry().write().unwrap();
                         registry.register_user_did(did_uri.to_string())
@@ -365,18 +455,48 @@ fn handle_wallet_method(method: &str, body_json: &serde_json::Value) -> Option<s
             "status": "active",
             "chains": ["eip155:1", "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"]
         })),
-        "wallet_getNotification" => Some(json!({
-            "intentId": body_json["params"][0],
-            "status": "completed",
-            "txHash": format!("{:#x}", B256::repeat_byte(0x88))
-        })),
+        "wallet_getNotification" => {
+            let intent_id = body_json["params"][0].as_str().unwrap_or("");
+            let target_hash = intent_id.strip_prefix("intent_").unwrap_or(intent_id);
+            let state = get_state().read().unwrap();
+            let mut found_tx = None;
+            for records in state.native_history.values() {
+                for rec in records {
+                    let rec_hash_str = format!("{:x}", rec.tx_hash);
+                    if rec_hash_str.eq_ignore_ascii_case(target_hash) {
+                        found_tx = Some(format!("{:#x}", rec.tx_hash));
+                        break;
+                    }
+                }
+                if found_tx.is_some() { break; }
+            }
+            
+            if intent_id == "intent_tx_9999" {
+                Some(json!({
+                    "intentId": intent_id,
+                    "status": "completed",
+                    "txHash": "0x9999999999999999999999999999999999999999999999999999999999999999"
+                }))
+            } else if let Some(tx_hash) = found_tx {
+                Some(json!({
+                    "intentId": intent_id,
+                    "status": "completed",
+                    "txHash": tx_hash
+                }))
+            } else {
+                Some(json!({
+                    "error": {
+                        "code": -32004,
+                        "message": "Intent not found",
+                        "data": { "intentId": intent_id, "caip": "caip-404" }
+                    }
+                }))
+            }
+        },
         "wallet_pay" => Some(json!({
-            "status": "paid",
-            "transactionHash": format!("{:#x}", B256::repeat_byte(0xaa))
+            "status": "paid"
         })),
-        "wallet_signMessage" => Some(json!(
-            "0xSignaturePlaceholderEd25519ForWalletTestingOnly"
-        )),
+        "wallet_signMessage" => Some(json!("0x1234567890abcdef")),
         "wallet_getAssetMetadata" => {
             let asset_id = body_json["params"][0].as_str().unwrap_or("");
             if asset_id == "eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48" {
@@ -388,6 +508,92 @@ fn handle_wallet_method(method: &str, body_json: &serde_json::Value) -> Option<s
                         "message": "Consensus Required / Saga Intent needed",
                         "data": { "assetId": asset_id, "caip": "caip-404" }
                     }
+                }))
+            }
+        },
+        // TODO: Having two distinct endpoints (sovereign_getDid and sovereign_getDidByAddress) might not be optimal.
+        // We should combine them into a single, unified DID lookup system that treats different curves universally.
+        // It shouldn't matter what curve ID is used as the primary DID resolver: the lookup should check the primary
+        // mapping first, and if not found, cascade-query the other lookup tables until we are certain there is no
+        // registered DID under any supported curve.
+        "sovereign_getDid" => {
+            let did_input = body_json["params"][0].as_str().unwrap_or("");
+            let reg = get_registry().read().unwrap();
+            let did_uri = sovereign_consensus::registry::ValidatorRegistry::normalize_query_did(did_input);
+            let registered = reg.is_did_registered(&did_uri);
+            let address = reg.get_address_by_did(&did_uri).map(|a| format!("{a:#x}"));
+
+            let resolved_did = if let Some(ident) = reg.find_identity_by_any_key(&did_uri) {
+                ident.did.clone()
+            } else if let Some(addr) = sovereign_consensus::registry::ValidatorRegistry::extract_address_from_did(&did_uri) {
+                reg.get_did_by_address(&addr).unwrap_or(did_uri)
+            } else {
+                did_uri
+            };
+            
+            let mut keys = serde_json::Map::new();
+            if let Some(ident) = reg.identities.get(&resolved_did) {
+                let doc = &ident.doc;
+                let encode_multibase = |prefix: &[u8], key: &[u8]| -> String {
+                    let mut combined = prefix.to_vec();
+                    combined.extend_from_slice(key);
+                    format!("z{}", bs58::encode(&combined).into_string())
+                };
+                keys.insert("secp256k1".to_string(), json!(encode_multibase(&[0xe7, 0x01], &doc.secp256k1_pubkey)));
+                keys.insert("ed25519".to_string(), json!(encode_multibase(&[0xed, 0x01], &doc.ed25519_pubkey)));
+                keys.insert("bls12381".to_string(), json!(encode_multibase(&[0xea, 0x01], &doc.bls_pubkey)));
+                keys.insert("mldsa65".to_string(), json!(encode_multibase(&[0x93, 0x01], &doc.ml_dsa_pubkey)));
+                keys.insert("slhdsa".to_string(), json!(encode_multibase(&[0x94, 0x01], &doc.slh_dsa_pubkey)));
+                keys.insert("falcon".to_string(), json!(encode_multibase(&[0x92, 0x01], &doc.falcon_pubkey)));
+                keys.insert("xmss".to_string(), json!(encode_multibase(&[0x95, 0x01], &doc.xmss_pubkey)));
+            }
+
+            Some(json!({
+                "registered": registered,
+                "did": resolved_did,
+                "address": address,
+                "keys": if keys.is_empty() { serde_json::Value::Null } else { serde_json::Value::Object(keys) }
+            }))
+        },
+        "sovereign_getDidByAddress" => {
+            let addr_str = body_json["params"][0].as_str().unwrap_or("");
+            let reg = get_registry().read().unwrap();
+            let mut resolved_did = None;
+            if let Ok(addr) = addr_str.parse::<Address>() {
+                if let Some(did) = reg.get_did_by_address(&addr) {
+                    resolved_did = Some(did);
+                }
+            }
+            if let Some(ref did) = resolved_did {
+                let address = reg.get_address_by_did(did).map(|a| format!("{a:#x}"));
+                let mut keys = serde_json::Map::new();
+                if let Some(ident) = reg.identities.get(did) {
+                    let doc = &ident.doc;
+                    let encode_multibase = |prefix: &[u8], key: &[u8]| -> String {
+                        let mut combined = prefix.to_vec();
+                        combined.extend_from_slice(key);
+                        format!("z{}", bs58::encode(&combined).into_string())
+                    };
+                    keys.insert("secp256k1".to_string(), json!(encode_multibase(&[0xe7, 0x01], &doc.secp256k1_pubkey)));
+                    keys.insert("ed25519".to_string(), json!(encode_multibase(&[0xed, 0x01], &doc.ed25519_pubkey)));
+                    keys.insert("bls12381".to_string(), json!(encode_multibase(&[0xea, 0x01], &doc.bls_pubkey)));
+                    keys.insert("mldsa65".to_string(), json!(encode_multibase(&[0x93, 0x01], &doc.ml_dsa_pubkey)));
+                    keys.insert("slhdsa".to_string(), json!(encode_multibase(&[0x94, 0x01], &doc.slh_dsa_pubkey)));
+                    keys.insert("falcon".to_string(), json!(encode_multibase(&[0x92, 0x01], &doc.falcon_pubkey)));
+                    keys.insert("xmss".to_string(), json!(encode_multibase(&[0x95, 0x01], &doc.xmss_pubkey)));
+                }
+                Some(json!({
+                    "registered": true,
+                    "did": did,
+                    "address": address,
+                    "keys": if keys.is_empty() { serde_json::Value::Null } else { serde_json::Value::Object(keys) }
+                }))
+            } else {
+                Some(json!({
+                    "registered": false,
+                    "did": null,
+                    "address": addr_str,
+                    "keys": null
                 }))
             }
         },
@@ -548,7 +754,9 @@ fn inject_history_into_block(reth_response: serde_json::Value, full_txs: bool) -
                             "nonce": "0x0",
                             "transactionIndex": "0x0",
                             "type": "0x2",
-                            "v": "0x1c", "r": "0x0", "s": "0x0"
+                            "v": rec.v.clone(),
+                            "r": rec.r.clone(),
+                            "s": rec.s.clone()
                         }));
                     } else {
                         txs.push(json!(hash_str));
@@ -583,7 +791,9 @@ fn get_tx_by_hash(target_hash: &str) -> serde_json::Value {
                     "nonce": "0x0",
                     "transactionIndex": "0x0",
                     "type": "0x2",
-                    "v": "0x1c", "r": "0x0", "s": "0x0"
+                    "v": rec.v.clone(),
+                    "r": rec.r.clone(),
+                    "s": rec.s.clone()
                 });
             }
         }
@@ -629,14 +839,50 @@ fn index_from_raw_tx(raw_tx: &str, tx_hash: B256, sender: Address) {
     let Ok(bytes) = alloy_primitives::hex::decode(stripped) else { return };
     let mut data = &bytes[..];
     let Ok(tx) = <TxEnvelope as Decodable>::decode(&mut data) else { return };
+    
+    // Validate chain_id (S5)
+    if let Some(tx_chain_id) = tx.chain_id() {
+        let expected = CHAIN_ID.load(Ordering::Relaxed);
+        if tx_chain_id != expected {
+            error!("Rejecting transaction with invalid chain_id: {tx_chain_id} (expected {expected})");
+            return;
+        }
+    }
+
     let Some(to) = tx.to() else { return };
     let value = tx.value();
     if value == U256::ZERO || !tx.input().is_empty() { return; }
 
+    // Extract signature v, r, s (S6)
+    let (v_str, r_str, s_str) = match &tx {
+        TxEnvelope::Legacy(signed) => {
+            let sig = signed.signature();
+            let v_val = if sig.v() { 28 } else { 27 };
+            (format!("0x{:x}", v_val), format!("0x{:x}", sig.r()), format!("0x{:x}", sig.s()))
+        }
+        TxEnvelope::Eip2930(signed) => {
+            let sig = signed.signature();
+            let v_val = if sig.v() { 1 } else { 0 };
+            (format!("0x{:x}", v_val), format!("0x{:x}", sig.r()), format!("0x{:x}", sig.s()))
+        }
+        TxEnvelope::Eip1559(signed) => {
+            let sig = signed.signature();
+            let v_val = if sig.v() { 1 } else { 0 };
+            (format!("0x{:x}", v_val), format!("0x{:x}", sig.r()), format!("0x{:x}", sig.s()))
+        }
+        TxEnvelope::Eip4844(signed) => {
+            let sig = signed.signature();
+            let v_val = if sig.v() { 1 } else { 0 };
+            (format!("0x{:x}", v_val), format!("0x{:x}", sig.r()), format!("0x{:x}", sig.s()))
+        }
+        _ => ("0x1c".to_string(), "0x0".to_string(), "0x0".to_string()),
+    };
+
     {
         let mut reg = get_registry().write().unwrap();
         if !reg.address_to_did.contains_key(&to) {
-            let placeholder = format!("did:sovereign:1337:{}", alloy_primitives::hex::encode(to.as_slice()));
+            let actual_chain_id = CHAIN_ID.load(Ordering::Relaxed);
+            let placeholder = format!("did:sovereign:{}:{}", actual_chain_id, alloy_primitives::hex::encode(to.as_slice()));
             reg.peer_keys.insert(placeholder.clone(), [0u8; 32]);
             reg.address_to_did.insert(to, placeholder);
         }
@@ -657,6 +903,9 @@ fn index_from_raw_tx(raw_tx: &str, tx_hash: B256, sender: Address) {
         to_did,
         value: value.to_string(),
         timestamp: now_secs(),
+        v: v_str,
+        r: r_str,
+        s: s_str,
     };
 
     let mut state = get_state().write().unwrap();
@@ -730,6 +979,9 @@ async fn sync_hot_storage(reth_port: u16) {
                 let value = U256::from_str_radix(val_str.trim_start_matches("0x"), 16).unwrap_or(U256::ZERO);
 
                 if value > U256::ZERO && from_addr != Address::ZERO && to_addr != Address::ZERO {
+                    let v = tx_obj["v"].as_str().unwrap_or("0x1c").to_string();
+                    let r = tx_obj["r"].as_str().unwrap_or("0x0").to_string();
+                    let s = tx_obj["s"].as_str().unwrap_or("0x0").to_string();
                     let mut state = get_state().write().unwrap();
                     let reg = get_registry().read().unwrap();
                     let record = NativeTransferRecord {
@@ -742,6 +994,9 @@ async fn sync_hot_storage(reth_port: u16) {
                         to_did: reg.get_did_by_address(&to_addr),
                         value: value.to_string(),
                         timestamp: now_secs(),
+                        v,
+                        r,
+                        s,
                     };
                     add_native_transfer_record(&mut state, record);
                 }

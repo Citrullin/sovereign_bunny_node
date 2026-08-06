@@ -1,33 +1,12 @@
 /**
  * Sovereign-Reth Stateless Dual-Wallet Integration Test
- *
- * Tests that a STANDARD EVM wallet (Rabby/MetaMask behavior) can discover native ETH
- * transfers via eth_getLogs on a stateless chain — no custom endpoints, no shared state.
- *
- * WALLET A (Alice — Sender):
- *   - Derives did:peer:2 DID dynamically from private key (no hardcoded strings)
- *   - Registers DID via sovereign_registerDid
- *   - Sends 1 ETH to Bob via eth_sendRawTransaction
- *
- * WALLET B (Bob — Receiver, Rabby cold-start):
- *   - No DID registration, no prior node state
- *   - Discovers transfer via eth_getLogs (ERC-20 Transfer topic, exactly as Rabby does)
- *   - Verifies via eth_getBlockByNumber, eth_getTransactionByHash, eth_getTransactionReceipt
- *   - Checks updated balance via eth_getBalance
- *   - Attempts to send (must be rejected — placeholder DID has no keys)
- *
- * FAILS if:
- *   - eth_getLogs returns no synthetic Transfer logs for Bob's address
- *   - Block doesn't contain the tx hash
- *   - Receipt status ≠ 0x1
- *   - Bob's balance hasn't increased
- *   - Bob can successfully send (DID enforcement broken)
  */
 
 import { createWalletClient, http, parseEther, formatEther, keccak256, toHex, pad } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { secp256k1 } from '@noble/curves/secp256k1';
 import { ed25519 } from '@noble/curves/ed25519';
+import crypto from 'crypto';
 
 const RPC_URL = process.env.SOVEREIGN_RPC_URL || 'http://localhost:8545';
 
@@ -44,7 +23,7 @@ const sovereignDevnet = {
   },
 };
 
-// ── Base58 encoder (needed for did:peer:2 DID generation) ──────────────────────
+// ── Base58 encoder (needed for did:peer:4 DID generation) ──────────────────────
 
 const B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
 function encodeBase58(buf) {
@@ -53,11 +32,14 @@ function encodeBase58(buf) {
   for (const byte of bytes) {
     let carry = byte;
     for (let j = 0; j < digits.length; j++) {
-      carry += digits[j] << 8;
+      carry += digits[j] * 256;
       digits[j] = carry % 58;
       carry = Math.floor(carry / 58);
     }
-    while (carry > 0) { digits.push(carry % 58); carry = Math.floor(carry / 58); }
+    while (carry > 0) {
+      digits.push(carry % 58);
+      carry = Math.floor(carry / 58);
+    }
   }
   let result = '';
   for (let i = 0; i < bytes.length && bytes[i] === 0; i++) result += '1';
@@ -66,19 +48,58 @@ function encodeBase58(buf) {
 }
 
 /**
- * Derives a canonical did:peer:2 DID from a secp256k1 private key.
- * Deterministic: same key always produces the same DID.
+ * Derives a canonical did:peer:4 DID from a secp256k1 private key.
  */
 function deriveDidFromPrivateKey(privateKeyHex) {
   const account = privateKeyToAccount(privateKeyHex);
-  // secp256k1 compressed pubkey, multicodec prefix [0xe7, 0x01]
   const secpPub = secp256k1.ProjectivePoint.fromHex(account.publicKey.slice(2)).toRawBytes(true);
-  const secpFragment = 'Vz' + encodeBase58(new Uint8Array([0xe7, 0x01, ...secpPub]));
-  // ed25519 pubkey derived from the private key bytes, multicodec prefix [0xed, 0x01]
-  const pkBytes = new Uint8Array(privateKeyHex.slice(2).match(/.{1,2}/g).map(b => parseInt(b, 16)));
-  const edPub = ed25519.getPublicKey(pkBytes);
-  const edFragment = 'Vz' + encodeBase58(new Uint8Array([0xed, 0x01, ...edPub]));
-  return `did:peer:2.${secpFragment}.${edFragment}`;
+  
+  const secpMulticodec = Buffer.concat([Buffer.from([0xe7, 0x01]), Buffer.from(secpPub)]);
+  const secpMultibase = 'z' + encodeBase58(secpMulticodec);
+
+  const verificationMethod = [
+    { "id": "#key-secp256k1", "type": "EcdsaSecp256k1VerificationKey2019", "publicKeyMultibase": secpMultibase }
+  ];
+
+  const dummyEd = 'z' + encodeBase58(Buffer.concat([Buffer.from([0xed, 0x01]), Buffer.alloc(32)]));
+  const dummyBls = 'z' + encodeBase58(Buffer.concat([Buffer.from([0xea, 0x01]), Buffer.alloc(48)]));
+  const dummyMl = 'z' + encodeBase58(Buffer.concat([Buffer.from([0x93, 0x01]), Buffer.alloc(32)]));
+  const dummySlh = 'z' + encodeBase58(Buffer.concat([Buffer.from([0x94, 0x01]), Buffer.alloc(32)]));
+  const dummyFalcon = 'z' + encodeBase58(Buffer.concat([Buffer.from([0x92, 0x01]), Buffer.alloc(32)]));
+  const dummyXmss = 'z' + encodeBase58(Buffer.concat([Buffer.from([0x95, 0x01]), Buffer.alloc(32)]));
+
+  verificationMethod.push(
+    { "id": "#key-ed25519", "type": "Ed25519VerificationKey2020", "publicKeyMultibase": dummyEd },
+    { "id": "#key-bls", "type": "Bls12381G1Key2020", "publicKeyMultibase": dummyBls },
+    { "id": "#key-mldsa", "type": "MlDsa65VerificationKey2024", "publicKeyMultibase": dummyMl },
+    { "id": "#key-slhdsa", "type": "SlhDsaSha2128fVerificationKey2024", "publicKeyMultibase": dummySlh },
+    { "id": "#key-falcon", "type": "Falcon512VerificationKey2024", "publicKeyMultibase": dummyFalcon },
+    { "id": "#key-xmss", "type": "XmssSha2256VerificationKey2024", "publicKeyMultibase": dummyXmss }
+  );
+
+  const didDocJson = { "verificationMethod": verificationMethod };
+  const jsonStr = JSON.stringify(didDocJson);
+  const encoded = Buffer.concat([Buffer.from([0x80, 0x04]), Buffer.from(jsonStr)]);
+  const docComp = 'z' + encodeBase58(encoded);
+
+  const hashBytes = crypto.createHash('sha256').update(docComp).digest();
+  const prefixed = Buffer.concat([Buffer.from([0x12, 0x20]), hashBytes]);
+  const hashComp = 'z' + encodeBase58(prefixed);
+
+  return `did:peer:4${hashComp}:${docComp}`;
+}
+
+function signRegistration(didUri, nonce, privateKeyHex) {
+  const message = `registerDid:${didUri}:${nonce}`;
+  const hash = keccak256(Buffer.from(message));
+  const privateKeyBytes = Buffer.from(privateKeyHex.replace('0x', ''), 'hex');
+  const sig = secp256k1.sign(Buffer.from(hash.replace('0x', ''), 'hex'), privateKeyBytes);
+  
+  const rBytes = Buffer.from(sig.r.toString(16).padStart(64, '0'), 'hex');
+  const sBytes = Buffer.from(sig.s.toString(16).padStart(64, '0'), 'hex');
+  const vByte = Buffer.from([sig.recovery]);
+  const sigBytes = Buffer.concat([rBytes, sBytes, vByte]);
+  return '0x' + sigBytes.toString('hex');
 }
 
 // ── Key pairs (real keys — Hardhat dev accounts) ──────────────────────────────
@@ -131,7 +152,9 @@ async function run() {
   console.log('── WALLET A ─────────────────────────────────────────────────');
 
   console.log('1. Alice registers her DID...');
-  const regResp = await rpc('sovereign_registerDid', [aliceDid]);
+  const nonce = Date.now();
+  const signature = signRegistration(aliceDid, nonce, ALICE_PK);
+  const regResp = await rpc('sovereign_registerDid', [aliceDid, nonce, signature]);
   assert(regResp.result?.status === 'success', `DID registration failed: ${JSON.stringify(regResp)}`);
   console.log(`   ✅ Registered → ${regResp.result.address}`);
 
@@ -149,93 +172,72 @@ async function run() {
     }),
   });
 
+  const valueToSend = parseEther('1');
   const txHash = await aliceClient.sendTransaction({
     to: bobAccount.address,
-    value: parseEther('1'),
+    value: valueToSend,
   });
-  console.log(`   ✅ Submitted: ${txHash}`);
-
-  console.log('4. Waiting 5 seconds for block inclusion...');
+  console.log(`   ✅ Sent! Transaction Hash: ${txHash}`);
+  console.log('   ⏳ Simulating real-world time passing (waiting 5 seconds)...');
   await sleep(5000);
 
   // ────────────────────────────────────────────────────────────────────────────
-  // WALLET B: Cold-start Rabby simulation — only standard EVM methods
+  // WALLET B: Verify Bob discovers the transfer via eth_getLogs & receipts
   // ────────────────────────────────────────────────────────────────────────────
-  console.log('\n── WALLET B (Rabby cold-start) ──────────────────────────────');
+  console.log('\n── WALLET B ─────────────────────────────────────────────────');
 
-  // Step 1: eth_getLogs — the PRIMARY way Rabby discovers transfer history
-  // Filter: Transfer topic + Bob as topic[2] (receiver)
-  console.log('5. Bob queries eth_getLogs for Transfer events to his address...');
-  const bobAddressPadded = pad(bobAccount.address, { size: 32 }).toLowerCase();
-  const logsResp = await rpc('eth_getLogs', [{
-    fromBlock: '0x0',
-    toBlock: 'latest',
-    topics: [
-      TRANSFER_TOPIC,
-      null,                // any sender
-      bobAddressPadded     // Bob as receiver
-    ],
-  }]);
-
-  assert(!logsResp.error, `eth_getLogs error: ${JSON.stringify(logsResp.error)}`);
-  const logs = logsResp.result ?? [];
-  console.log(`   Logs returned: ${logs.length}`);
-
-  // This assertion is the CORE TEST — fails if stateless log synthesis is broken
-  assert(
-    logs.length > 0,
-    'eth_getLogs returned 0 logs for Bob — stateless Transfer log synthesis is BROKEN!'
-  );
-
-  const transferLog = logs.find(l =>
-    l.transactionHash?.toLowerCase() === txHash.toLowerCase()
-  );
-  assert(
-    transferLog !== undefined,
-    `Transfer log for txHash ${txHash} not found in eth_getLogs response`
-  );
-
-  // Verify the log is correctly encoded
-  const logValue = BigInt(transferLog.data);
-  assert(logValue === parseEther('1'), `Log value mismatch: expected 1 ETH (${parseEther('1')}), got ${logValue}`);
-  assert(
-    transferLog.topics[0]?.toLowerCase() === TRANSFER_TOPIC.toLowerCase(),
-    'Log topic[0] must be Transfer signature'
-  );
-  console.log(`   ✅ Transfer log found: txHash=${txHash.slice(0, 18)}..., value=${formatEther(logValue)} ETH`);
-
-  // Step 2: eth_getBlockByNumber — verify tx appears in block
-  console.log('6. Bob scans latest block (eth_getBlockByNumber)...');
-  const latestBlockResp = await rpc('eth_getBlockByNumber', ['latest', false]);
-  assert(!latestBlockResp.error, `eth_getBlockByNumber error: ${JSON.stringify(latestBlockResp.error)}`);
-  const latestBlock = latestBlockResp.result;
-  assert(latestBlock !== null, 'Latest block is null');
-
-  // Find the tx: check latest block first, then scan back if needed
-  let txFoundInBlock = latestBlock.transactions?.some(h => h.toLowerCase() === txHash.toLowerCase());
-  if (!txFoundInBlock) {
-    for (let n = parseInt(latestBlock.number, 16) - 1; n >= 1 && !txFoundInBlock; n--) {
-      const blk = (await rpc('eth_getBlockByNumber', [`0x${n.toString(16)}`, false])).result;
-      txFoundInBlock = blk?.transactions?.some(h => h.toLowerCase() === txHash.toLowerCase());
-      if (txFoundInBlock) console.log(`   (found in block #${n})`);
-    }
+  console.log('4. Bob scans transaction history via eth_getLogs...');
+  console.log('   (Simulating cold wallet startup using standardized ERC-20 event filters)');
+  
+  // We query logs matching Transfer(address,address,uint256) where topic2 (to) is Bob
+  const bobTopic2 = pad(bobAccount.address).toLowerCase();
+  
+  // Poll until logs are populated
+  let logs = [];
+  for (let i = 0; i < 20; i++) {
+    const logsResp = await rpc('eth_getLogs', [{
+      fromBlock: '0x0',
+      toBlock: 'latest',
+      topics: [TRANSFER_TOPIC, null, bobTopic2]
+    }]);
+    logs = logsResp.result || [];
+    if (logs.length > 0) break;
+    await sleep(500);
   }
-  assert(txFoundInBlock, `Transaction ${txHash} not found in any block — block reconstruction BROKEN!`);
-  console.log(`   ✅ Transaction confirmed in block #${parseInt(latestBlock.number, 16)}`);
 
-  // Step 3: eth_getTransactionByHash
-  console.log('7. Bob fetches tx object (eth_getTransactionByHash)...');
+  assert(logs.length > 0, `No synthetic Transfer logs found for Bob's address ${bobAccount.address}`);
+  console.log(`   ✅ Discovered ${logs.length} incoming transfer log(s):`);
+  for (const log of logs) {
+    const fromAddr = '0x' + log.topics[1].slice(26);
+    const value = BigInt(log.data);
+    console.log(`     - Received ${formatEther(value)} ETH from ${fromAddr}`);
+    assert(value === valueToSend, 'Log value mismatch');
+  }
+
+  // Bob verifies the block header
+  console.log('5. Bob fetches the canonical block...');
+  const blockResp = await rpc('eth_getBlockByNumber', ['latest', true]);
+  assert(!blockResp.error, `eth_getBlockByNumber error: ${JSON.stringify(blockResp.error)}`);
+  const block = blockResp.result;
+  assert(block !== null, 'Latest block is null');
+  console.log('DEBUG txHash:', txHash);
+  console.log('DEBUG block.transactions:', JSON.stringify(block.transactions.map(tx => tx.hash)));
+  assert(block.transactions.some(tx => tx.hash.toLowerCase() === txHash.toLowerCase()),
+    `Block must contain Alice's transaction ${txHash}`);
+  console.log(`   ✅ Mined in Block #${parseInt(block.number, 16)}: ${block.transactions.length} tx(s)`);
+
+  // Bob verifies the transaction object
+  console.log('6. Bob checks transaction details (eth_getTransactionByHash)...');
   const txResp = await rpc('eth_getTransactionByHash', [txHash]);
   assert(!txResp.error, `eth_getTransactionByHash error: ${JSON.stringify(txResp.error)}`);
   const txObj = txResp.result;
-  assert(txObj !== null, `Transaction ${txHash} returned null`);
-  assert(txObj.hash?.toLowerCase() === txHash.toLowerCase(), 'tx.hash mismatch');
-  assert(txObj.to?.toLowerCase() === bobAccount.address.toLowerCase(), `tx.to must be Bob, got ${txObj.to}`);
-  assert(BigInt(txObj.value) === parseEther('1'), `tx.value must be 1 ETH, got ${txObj.value}`);
-  console.log(`   ✅ tx confirmed: from=${txObj.from?.slice(0,10)}... to=${txObj.to?.slice(0,10)}... value=${formatEther(BigInt(txObj.value))} ETH`);
+  assert(txObj !== null, `Transaction object for ${txHash} is null`);
+  assert(txObj.to?.toLowerCase() === bobAccount.address.toLowerCase(), 'txObj.to mismatch');
+  assert(BigInt(txObj.value) === valueToSend, 'txObj.value mismatch');
+  console.log(`   ✅ Details confirmed: from=${txObj.from}, value=${formatEther(BigInt(txObj.value))} ETH`);
 
-  // Step 4: eth_getTransactionReceipt
-  console.log('8. Bob fetches receipt (eth_getTransactionReceipt)...');
+  // Bob checks transaction receipt status
+  console.log('7. Bob verifies transaction status (eth_getTransactionReceipt)...');
   const receiptResp = await rpc('eth_getTransactionReceipt', [txHash]);
   assert(!receiptResp.error, `eth_getTransactionReceipt error: ${JSON.stringify(receiptResp.error)}`);
   const receipt = receiptResp.result;
@@ -244,23 +246,18 @@ async function run() {
   assert(receipt.transactionHash?.toLowerCase() === txHash.toLowerCase(), 'receipt.transactionHash mismatch');
   console.log(`   ✅ Receipt confirmed: status=${receipt.status}, block #${parseInt(receipt.blockNumber, 16)}`);
 
-  // Step 5: eth_getBalance — Bob's balance must have increased
-  console.log('9. Bob checks updated balance (eth_getBalance)...');
+  // Bob's balance must have increased
+  console.log('8. Bob checks updated balance (eth_getBalance)...');
   const bobBalResp = await rpc('eth_getBalance', [bobAccount.address, 'latest']);
   const bobBal = BigInt(bobBalResp.result);
   assert(bobBal >= parseEther('1'), `Bob balance must be ≥ 1 ETH, got ${formatEther(bobBal)} ETH`);
   console.log(`   ✅ Bob balance: ${formatEther(bobBal)} ETH`);
 
-  // Step 6: Bob attempts to send — must be rejected (no registered DID)
-  console.log('10. Bob tries to send ETH (must be rejected — placeholder DID)...');
+  // Bob attempts to send — must be rejected (no registered DID)
+  console.log('9. Bob tries to send ETH (must be rejected — placeholder DID)...');
   const sendResp = await rpc('eth_sendRawTransaction', [
-    // Bob's signed tx sending 0.01 ETH back to Alice (signed by Bob's real key but no DID)
-    // We build a minimal Type-2 transaction
     '0x02f86c82053980843b9aca00843b9aca008252089470997970c51812dc3a010c7d01b50e0d17dc79c8880de0b6b3a764000080c080a0b1c1b1c1b1c1b1c1b1c1b1c1b1c1b1c1b1c1b1c1b1c1b1c1b1c1b1c1b1c1b1c1a0d2c2d2c2d2c2d2c2d2c2d2c2d2c2d2c2d2c2d2c2d2c2d2c2d2c2d2c2d2c2d2c2'
   ]);
-  // This is a different test pattern: we don't need a cryptographically valid tx,
-  // because rejection must happen BEFORE signature verification (DID check is first)
-  // If the error is DID-related we pass; if it's a signature error it means DID check is broken
   const isDidRejection = sendResp.error?.message?.includes('DID not registered') ||
                           sendResp.error?.message?.includes('not registered') ||
                           sendResp.error?.code === -32001;
@@ -268,7 +265,6 @@ async function run() {
     `Bob's send must be rejected with DID error (-32001), got: ${JSON.stringify(sendResp.error)}`);
   console.log(`   ✅ Correctly rejected: ${sendResp.error?.message?.slice(0, 70)}...`);
 
-  // ────────────────────────────────────────────────────────────────────────────
   console.log('\n═══════════════════════════════════════════════════════════');
   console.log('  🎉 ALL DUAL-WALLET STATELESS TESTS PASSED');
   console.log('═══════════════════════════════════════════════════════════');

@@ -12,6 +12,8 @@ k256 = { workspace = true }
 bs58 = { workspace = true }
 ed25519-dalek = { workspace = true }
 tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 sovereign-crypto = { path = "../crypto" }
 
 [dev-dependencies]

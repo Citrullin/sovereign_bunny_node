@@ -54,8 +54,13 @@ sovereign-consensus = { workspace = true }
 sovereign-attestation = { workspace = true }
 sovereign-identity = { workspace = true }
 sovereign-network = { workspace = true }
+sovereign-crypto = { path = "../crypto" }
 toml = { workspace = true }
 bs58 = { workspace = true }
 ed25519-dalek = { workspace = true }
 did-peer = { workspace = true }
+fips204 = { workspace = true }
+fips205 = { workspace = true }
+pqcrypto-falcon = { workspace = true }
+pqcrypto-traits = { workspace = true }
 jsonrpsee = { version = "0.26.0", features = ["server", "macros"] }

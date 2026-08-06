@@ -164,6 +164,66 @@ async fn test_rpc_end_to_end() -> eyre::Result<()> {
     // Gas Price: 1 gwei, Gas Limit: 21000, Nonce: 0, ChainId: 13371337
     let raw_tx = "0x01f87083cc07c980843b9aca0082520894918c30482462c8024ba6cf34a18ba1f8bbdb755f880de0b6b3a764000080c080a099c986756ba6708e5f1ec0015cfae419544219e63bacb20ce97e8af9cbf5bc9ba06803f04dc69211392001b3454b82d0b6288d4ad5c9f60afcc7f251e1dcf277f6";
     
+    // Register the sender's DID first (E1/E3)
+    println!("Registering sender DID on-chain first...");
+    let sender_priv_key_bytes = alloy_primitives::hex::decode("ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80").unwrap();
+    let signing_key = k256::ecdsa::SigningKey::from_slice(&sender_priv_key_bytes).unwrap();
+    let verifying_key = signing_key.verifying_key();
+    let secp_pub_bytes = verifying_key.to_sec1_point(true).as_bytes().to_vec();
+
+    let secp_multibase = format!("z{}", bs58::encode([&[0xe7, 0x01], secp_pub_bytes.as_slice()].concat()).into_string());
+    let ed_multibase = format!("z{}", bs58::encode([&[0xed, 0x01], &[0u8; 32][..]].concat()).into_string());
+    let bls_multibase = format!("z{}", bs58::encode([&[0xea, 0x01], &[0u8; 48][..]].concat()).into_string());
+    let ml_multibase = format!("z{}", bs58::encode([&[0x93, 0x01], &[0u8; 32][..]].concat()).into_string());
+    let slh_multibase = format!("z{}", bs58::encode([&[0x94, 0x01], &[0u8; 32][..]].concat()).into_string());
+    let falcon_multibase = format!("z{}", bs58::encode([&[0x92, 0x01], &[0u8; 32][..]].concat()).into_string());
+    let xmss_multibase = format!("z{}", bs58::encode([&[0x95, 0x01], &[0u8; 32][..]].concat()).into_string());
+
+    let did_doc_json = serde_json::json!({
+        "verificationMethod": [
+            { "id": "#key-secp256k1", "type": "EcdsaSecp256k1VerificationKey2019", "publicKeyMultibase": secp_multibase },
+            { "id": "#key-ed25519", "type": "Ed25519VerificationKey2020", "publicKeyMultibase": ed_multibase },
+            { "id": "#key-bls", "type": "Bls12381G1Key2020", "publicKeyMultibase": bls_multibase },
+            { "id": "#key-mldsa", "type": "MlDsa65VerificationKey2024", "publicKeyMultibase": ml_multibase },
+            { "id": "#key-slhdsa", "type": "SlhDsaSha2128fVerificationKey2024", "publicKeyMultibase": slh_multibase },
+            { "id": "#key-falcon", "type": "Falcon512VerificationKey2024", "publicKeyMultibase": falcon_multibase },
+            { "id": "#key-xmss", "type": "XmssSha2256VerificationKey2024", "publicKeyMultibase": xmss_multibase },
+        ]
+    });
+
+    let json_str = serde_json::to_string(&did_doc_json).unwrap();
+    let mut encoded = vec![0x80, 0x04];
+    encoded.extend_from_slice(json_str.as_bytes());
+    let doc_comp = format!("z{}", bs58::encode(&encoded).into_string());
+
+    let hash_bytes = sovereign_crypto::hash(sovereign_crypto::HashScheme::Sha256, doc_comp.as_bytes());
+    let mut prefixed = vec![0x12, 0x20];
+    prefixed.extend_from_slice(&hash_bytes);
+    let hash_comp = format!("z{}", bs58::encode(&prefixed).into_string());
+
+    let did_uri = format!("did:peer:4{}:{}", hash_comp, doc_comp);
+
+    let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+    let message = format!("registerDid:{did_uri}:{nonce}");
+    let digest = alloy_primitives::keccak256(message.as_bytes());
+    use k256::ecdsa::signature::Signer as _;
+    let sig: k256::ecdsa::Signature = signing_key.sign(&digest[..]);
+    let sig_hex = format!("0x{}", alloy_primitives::hex::encode(sig.to_bytes()));
+
+    let reg_res: serde_json::Value = client.post(&url)
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "sovereign_registerDid",
+            "params": [did_uri, nonce, sig_hex],
+            "id": 1
+        }))
+        .send()
+        .await?
+        .json()
+        .await?;
+    assert!(reg_res["error"].is_null(), "sovereign_registerDid failed: {:?}", reg_res["error"]);
+    println!("Sender DID registered successfully: {}", reg_res["result"]);
+
     println!("Broadcasting signed transaction...");
     let res: serde_json::Value = client.post(&url)
         .json(&serde_json::json!({
