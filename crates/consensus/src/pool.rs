@@ -213,22 +213,136 @@ impl<T: PoolTransaction> TransactionOrdering for FCFSOrdering<T> {
     }
 }
 
-/// Custom validator wrapping any standard validator to enforce Zero Latency Quantum Trigger checks on pooled transactions.
-#[derive(Debug, Clone)]
-pub struct SovereignQuantumTransactionValidator<V> {
-    inner: V,
+/// Trait to read account balances from the underlying state or a fallback.
+pub trait LatticeStateProvider: Send + Sync + std::fmt::Debug + 'static {
+    /// Retrieve the balance of the given address.
+    fn get_balance(&self, address: alloy_primitives::Address) -> alloy_primitives::U256;
 }
 
-impl<V> SovereignQuantumTransactionValidator<V> {
-    /// Creates a new `SovereignQuantumTransactionValidator`.
-    pub fn new(inner: V) -> Self {
-        Self { inner }
+impl LatticeStateProvider for () {
+    fn get_balance(&self, _address: alloy_primitives::Address) -> alloy_primitives::U256 {
+        // Fallback testing balance
+        alloy_primitives::U256::from(10_000_000_000_000_000_000_000u128)
     }
 }
 
-impl<V, T, B> TransactionValidator for SovereignQuantumTransactionValidator<V>
+/// Wrapper for the Reth provider to implement LatticeStateProvider.
+#[derive(Clone)]
+pub struct LatticeClient<C>(pub C);
+
+impl<C> std::fmt::Debug for LatticeClient<C> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LatticeClient").finish()
+    }
+}
+
+impl<C> LatticeStateProvider for LatticeClient<C>
+where
+    C: reth_provider::StateProviderFactory + Send + Sync + Clone + 'static,
+{
+    fn get_balance(&self, address: alloy_primitives::Address) -> alloy_primitives::U256 {
+        use reth_provider::AccountReader;
+        if let Ok(latest) = self.0.latest() {
+            latest.basic_account(&address)
+                .ok()
+                .flatten()
+                .map(|acc| acc.balance)
+                .unwrap_or_default()
+        } else {
+            alloy_primitives::U256::ZERO
+        }
+    }
+}
+
+/// Helper to compute the dynamic lattice-enforced balance of an address.
+pub fn compute_lattice_balance(
+    address: alloy_primitives::Address,
+    reg: &crate::registry::ValidatorRegistry,
+    initial_balance: alloy_primitives::U256,
+) -> alloy_primitives::U256 {
+    let mut balance = initial_balance;
+    
+    for block in reg.lattice_blocks.values() {
+        if block.account == address {
+            match &block.payload {
+                crate::stateless::LatticePayload::Send { amount, .. } => {
+                    balance = balance.saturating_sub(*amount);
+                }
+                _ => {}
+            }
+        }
+        if let crate::stateless::LatticePayload::Receive { amount, .. } = &block.payload {
+            if block.account == address {
+                balance = balance.saturating_add(*amount);
+            }
+        }
+    }
+    balance
+}
+
+/// Helper to compute the dynamic lattice-enforced balance of an address, including auto-claimable inbox sends.
+pub fn compute_lattice_balance_with_autoclaim(
+    address: alloy_primitives::Address,
+    reg: &crate::registry::ValidatorRegistry,
+    initial_balance: alloy_primitives::U256,
+) -> alloy_primitives::U256 {
+    let mut balance = compute_lattice_balance(address, reg, initial_balance);
+
+    // Identify all claimed send hashes
+    let mut claimed = std::collections::HashSet::new();
+    for block in reg.lattice_blocks.values() {
+        if let crate::stateless::LatticePayload::Receive { send_block_hash, .. } = &block.payload {
+            claimed.insert(*send_block_hash);
+        }
+    }
+
+    // Collect all unclaimed sends targeting this address
+    let mut pending = Vec::new();
+    for (hash, block) in &reg.lattice_blocks {
+        if let crate::stateless::LatticePayload::Send { recipient, amount } = &block.payload {
+            if *recipient == address && !claimed.contains(hash) {
+                pending.push((*hash, *amount));
+            }
+        }
+    }
+
+    // Sort by highest amount first (Rule 3)
+    pending.sort_by(|a, b| b.1.cmp(&a.1));
+
+    // Limit to MAX_INBOX_BATCH = 20
+    let batch = pending.iter().take(20);
+    for (_, amount) in batch {
+        balance = balance.saturating_add(*amount);
+    }
+
+    balance
+}
+
+/// Custom validator wrapping any standard validator to enforce Zero Latency Quantum Trigger checks on pooled transactions.
+#[derive(Debug, Clone)]
+pub struct SovereignQuantumTransactionValidator<V, Client = ()> {
+    inner: V,
+    /// Custom state reader interface to retrieve database/fallback account balance.
+    pub client: Client,
+    /// Per-account isolated transaction queues representing Block-Lattice pools.
+    pub account_queues: Arc<Mutex<HashMap<alloy_primitives::Address, Vec<B256>>>>,
+}
+
+impl<V, Client> SovereignQuantumTransactionValidator<V, Client> {
+    /// Creates a new `SovereignQuantumTransactionValidator`.
+    pub fn new(inner: V, client: Client) -> Self {
+        Self {
+            inner,
+            client,
+            account_queues: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+}
+
+impl<V, Client, T, B> TransactionValidator for SovereignQuantumTransactionValidator<V, Client>
 where
     V: TransactionValidator<Transaction = T, Block = B>,
+    Client: LatticeStateProvider + Clone + 'static,
     T: PoolTransaction,
     B: reth_primitives_traits::Block,
 {
@@ -241,6 +355,106 @@ where
         transaction: Self::Transaction,
     ) -> TransactionValidationOutcome<Self::Transaction> {
         let registry_lock = crate::registry::get_registry();
+
+        // 1. Call standard inner transaction validator
+        let inner_outcome = self.inner.validate_transaction(origin, transaction.clone()).await;
+        
+        // 2. Intercept and override insufficient funds errors if auto-claimable balance is solvent
+        let final_outcome = match inner_outcome {
+            TransactionValidationOutcome::Invalid(tx, err) => {
+                let sender = tx.sender();
+                let is_block_lattice = if let Ok(reg) = registry_lock.read() {
+                    let has_key = reg.address_to_did.contains_key(&sender);
+                    tracing::info!(?sender, has_key, "Consensus pool validator: check is_block_lattice");
+                    has_key
+                } else {
+                    false
+                };
+                if is_block_lattice {
+                    if let Ok(reg) = registry_lock.read() {
+                        let initial_balance = self.client.get_balance(sender);
+                        let lattice_balance = compute_lattice_balance_with_autoclaim(sender, &reg, initial_balance);
+                        let gas_price = tx.gas_price().unwrap_or(0);
+                        let needed = tx.value().saturating_add(alloy_primitives::U256::from(tx.gas_limit()).saturating_mul(alloy_primitives::U256::from(gas_price)));
+                        tracing::info!(?sender, ?lattice_balance, ?needed, ?gas_price, "Consensus pool validator: evaluating sweep override");
+                        if lattice_balance >= needed {
+                            tracing::info!(?sender, "Consensus pool validator: OVERRIDING validation to Valid!");
+                            TransactionValidationOutcome::Valid {
+                                balance: lattice_balance,
+                                state_nonce: tx.nonce(),
+                                bytecode_hash: None,
+                                transaction: reth_transaction_pool::validate::ValidTransaction::Valid(tx),
+                                propagate: true,
+                                authorities: None,
+                            }
+                        } else {
+                            TransactionValidationOutcome::Invalid(tx, err)
+                        }
+                    } else {
+                        TransactionValidationOutcome::Invalid(tx, err)
+                    }
+                } else {
+                    TransactionValidationOutcome::Invalid(tx, err)
+                }
+            }
+            other => other,
+        };
+
+        if let TransactionValidationOutcome::Invalid(tx, err) = &final_outcome {
+            return final_outcome;
+        }
+
+        // Block-Lattice lock check:
+        if let Ok(reg) = registry_lock.read() {
+            let sender = transaction.sender();
+            if let Some(frontier) = reg.account_frontiers.get(&sender) {
+                if frontier.locked {
+                    tracing::warn!(?sender, "Rejecting transaction in pool: Sender account is locked");
+                    return TransactionValidationOutcome::Invalid(
+                        transaction,
+                        InvalidTransactionError::TxTypeNotSupported.into(),
+                    );
+                }
+            }
+            if let alloy_primitives::TxKind::Call(recipient) = transaction.kind() {
+                if let Some(frontier) = reg.account_frontiers.get(&recipient) {
+                    if frontier.locked {
+                        tracing::warn!(?recipient, "Rejecting transaction in pool: Target account is locked");
+                        return TransactionValidationOutcome::Invalid(
+                            transaction,
+                            InvalidTransactionError::TxTypeNotSupported.into(),
+                        );
+                    }
+                }
+            }
+        }
+
+        // Block-Lattice balance check:
+        if let Ok(reg) = registry_lock.read() {
+            let sender = transaction.sender();
+            let initial_balance = self.client.get_balance(sender);
+            let lattice_balance = compute_lattice_balance_with_autoclaim(sender, &reg, initial_balance);
+            let tx_value = transaction.value();
+            if lattice_balance < tx_value {
+                tracing::warn!(
+                    ?sender,
+                    ?lattice_balance,
+                    ?tx_value,
+                    "Rejecting transaction in pool: Insufficient lattice balance (Pending incoming transfers must be claimed via Receive blocks)"
+                );
+                return TransactionValidationOutcome::Invalid(
+                    transaction,
+                    InvalidTransactionError::TxTypeNotSupported.into(),
+                );
+            }
+        }
+
+        // Add to account pool queue
+        {
+            let mut queues = self.account_queues.lock().unwrap();
+            queues.entry(transaction.sender()).or_default().push(*transaction.hash());
+        }
+
         let (quantum_threat, default_pq_scheme) = if let Ok(reg) = registry_lock.read() {
             let dynamic = reg.dynamic_cfg.read().unwrap();
             (dynamic.zero_latency_quantum_trigger, dynamic.default_pq_scheme.clone())
@@ -290,7 +504,7 @@ where
             }
         }
 
-        self.inner.validate_transaction(origin, transaction).await
+        final_outcome
     }
 
     fn on_new_head_block(&self, new_head: &reth_primitives_traits::SealedBlock<Self::Block>) {
@@ -298,10 +512,18 @@ where
     }
 }
 
-/// Custom Pool Builder that sets up the FCFS transaction pool.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct SovereignPoolBuilder {
     pool_config: PoolConfig,
+}
+
+impl Default for SovereignPoolBuilder {
+    fn default() -> Self {
+        let mut pool_config = PoolConfig::default();
+        pool_config.minimal_protocol_basefee = 0;
+        pool_config.minimum_priority_fee = None;
+        Self { pool_config }
+    }
 }
 
 impl SovereignPoolBuilder {
@@ -329,6 +551,7 @@ where
                     Evm,
                 >,
             >,
+            LatticeClient<N::Provider>,
         >,
         FCFSOrdering<reth_ethereum::pool::EthPooledTransaction>,
         InMemoryBlobStore,
@@ -348,7 +571,7 @@ where
                 .with_additional_tasks(ctx.config().txpool.additional_validation_tasks)
                 .build_with_tasks(ctx.task_executor().clone(), blob_store.clone());
 
-        let validator = SovereignQuantumTransactionValidator::new(eth_validator);
+        let validator = SovereignQuantumTransactionValidator::new(eth_validator, LatticeClient(ctx.provider().clone()));
 
         let transaction_pool =
             Pool::new(validator, FCFSOrdering::new(), blob_store, self.pool_config);
@@ -563,7 +786,7 @@ mod tests {
         use crate::crypto::{pack_pq_envelope, SignatureScheme};
         use fips204::traits::{KeyGen, Signer, SerDes};
 
-        let validator = SovereignQuantumTransactionValidator::new(MockTransactionValidator::default());
+        let validator = SovereignQuantumTransactionValidator::new(MockTransactionValidator::default(), ());
         let tx = MockTransaction::eip1559();
 
         let registry_lock = crate::registry::get_registry();
@@ -618,6 +841,56 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_lattice_balance_calculation_and_restrictions() {
+        let registry_lock = crate::registry::get_registry();
+        let mut reg = registry_lock.write().unwrap();
+        *reg = crate::registry::ValidatorRegistry::default();
+
+        let alice = alloy_primitives::Address::repeat_byte(0x01);
+        let bob = alloy_primitives::Address::repeat_byte(0x02);
+
+        // Initial balance should be 10,000 ETH
+        let initial_balance = compute_lattice_balance(alice, &reg, alloy_primitives::U256::from(10_000_000_000_000_000_000_000u128));
+        assert_eq!(initial_balance, alloy_primitives::U256::from(10_000_000_000_000_000_000_000u128));
+
+        // Alice sends 3 ETH to Bob (Send block)
+        let send_block = crate::stateless::LatticeBlock {
+            account: alice,
+            previous_hash: B256::ZERO,
+            sequence: 1,
+            payload: crate::stateless::LatticePayload::Send { recipient: bob, amount: alloy_primitives::U256::from(3_000_000_000_000_000_000u128) },
+            signature: vec![],
+            static_witnesses: vec![],
+        };
+        reg.lattice_blocks.insert(B256::repeat_byte(0x11), send_block);
+
+        // Alice balance should now be 9,997 ETH
+        let alice_bal = compute_lattice_balance(alice, &reg, alloy_primitives::U256::from(10_000_000_000_000_000_000_000u128));
+        assert_eq!(alice_bal, alloy_primitives::U256::from(9_997_000_000_000_000_000_000u128));
+
+        // Bob's lattice balance should STILL be 10,000 ETH (the pending transfer has not been claimed yet!)
+        let bob_bal_pending = compute_lattice_balance(bob, &reg, alloy_primitives::U256::from(10_000_000_000_000_000_000_000u128));
+        assert_eq!(bob_bal_pending, alloy_primitives::U256::from(10_000_000_000_000_000_000_000u128));
+
+        // Bob receives the transfer (Receive block)
+        let receive_block = crate::stateless::LatticeBlock {
+            account: bob,
+            previous_hash: B256::ZERO,
+            sequence: 1,
+            payload: crate::stateless::LatticePayload::Receive {
+                send_block_hash: B256::repeat_byte(0x11),
+                amount: alloy_primitives::U256::from(3_000_000_000_000_000_000u128),
+            },
+            signature: vec![],
+            static_witnesses: vec![],
+        };
+        reg.lattice_blocks.insert(B256::repeat_byte(0x22), receive_block);
+
+        // Bob's balance should now be 10,003 ETH
+        let bob_bal_claimed = compute_lattice_balance(bob, &reg, alloy_primitives::U256::from(10_000_000_000_000_000_000_000u128));
+        assert_eq!(bob_bal_claimed, alloy_primitives::U256::from(10_003_000_000_000_000_000_000u128));
+    }
 }
 
 

@@ -166,16 +166,47 @@ impl ParallelExecutor for WaveExecutor {
                     if sender_acc.nonce != tx.nonce {
                         return Err(format!("Nonce mismatch for {:?}: expected {}, found {}", tx.sender, tx.nonce, sender_acc.nonce));
                     }
+                    // Pre-Execution Auto-Claim Pipeline (Task B):
+                    let auto_claim_amount = if let Ok(reg) = crate::registry::get_registry().read() {
+                        let mut claimed = std::collections::HashSet::new();
+                        for block in reg.lattice_blocks.values() {
+                            if let crate::stateless::LatticePayload::Receive { send_block_hash, .. } = &block.payload {
+                                claimed.insert(*send_block_hash);
+                            }
+                        }
+                        let mut pending = Vec::new();
+                        for (hash, block) in &reg.lattice_blocks {
+                            if let crate::stateless::LatticePayload::Send { recipient, amount } = &block.payload {
+                                if *recipient == tx.sender && !claimed.contains(hash) {
+                                    pending.push(*amount);
+                                }
+                            }
+                        }
+                        pending.sort_by(|a, b| b.cmp(a));
+                        pending.iter().take(20).sum::<alloy_primitives::U256>()
+                    } else {
+                        alloy_primitives::U256::ZERO
+                    };
+                    sender_acc.balance += auto_claim_amount;
+
                     if sender_acc.balance < tx.value {
                         return Err(format!("Insufficient balance for {:?}", tx.sender));
                     }
 
-                    // 2. Perform value transfer
+                    // 2. Perform value transfer (Sender only for Block-Lattice Send)
                     sender_acc.balance -= tx.value;
                     sender_acc.nonce += 1;
 
                     let mut recipient_acc = db_clone.accounts.get(&tx.recipient).cloned().unwrap_or_default();
-                    recipient_acc.balance += tx.value;
+                    // Do NOT increase recipient balance if this is a block-lattice transfer (recipient has registered DID).
+                    let is_block_lattice = if let Ok(reg) = crate::registry::get_registry().read() {
+                        reg.address_to_did.contains_key(&tx.recipient)
+                    } else {
+                        false
+                    };
+                    if !is_block_lattice {
+                        recipient_acc.balance += tx.value;
+                    }
 
                     // 3. Write storage slots using a deterministic simulated value based on tx_index and slot key
                     let mut write_slots: HashMap<Address, HashMap<U256, U256>> = HashMap::new();
@@ -376,13 +407,44 @@ impl ParallelExecutor for PevmExecutor {
                     if sender_acc.nonce != tx_clone.nonce {
                         return Err(format!("Nonce mismatch for {:?}: expected {}, found {}", tx_clone.sender, tx_clone.nonce, sender_acc.nonce));
                     }
+                    // Pre-Execution Auto-Claim Pipeline (Task B):
+                    let auto_claim_amount = if let Ok(reg) = crate::registry::get_registry().read() {
+                        let mut claimed = std::collections::HashSet::new();
+                        for block in reg.lattice_blocks.values() {
+                            if let crate::stateless::LatticePayload::Receive { send_block_hash, .. } = &block.payload {
+                                claimed.insert(*send_block_hash);
+                            }
+                        }
+                        let mut pending = Vec::new();
+                        for (hash, block) in &reg.lattice_blocks {
+                            if let crate::stateless::LatticePayload::Send { recipient, amount } = &block.payload {
+                                if *recipient == tx_clone.sender && !claimed.contains(hash) {
+                                    pending.push(*amount);
+                                }
+                            }
+                        }
+                        pending.sort_by(|a, b| b.cmp(a));
+                        pending.iter().take(20).sum::<alloy_primitives::U256>()
+                    } else {
+                        alloy_primitives::U256::ZERO
+                    };
+                    sender_acc.balance += auto_claim_amount;
+
                     if sender_acc.balance < tx_clone.value {
                         return Err(format!("Insufficient balance for {:?}", tx_clone.sender));
                     }
 
                     sender_acc.balance -= tx_clone.value;
                     sender_acc.nonce += 1;
-                    recipient_acc.balance += tx_clone.value;
+                    // Do NOT increase recipient_acc.balance if this is a block-lattice transfer (recipient has registered DID).
+                    let is_block_lattice = if let Ok(reg) = crate::registry::get_registry().read() {
+                        reg.address_to_did.contains_key(&tx_clone.recipient)
+                    } else {
+                        false
+                    };
+                    if !is_block_lattice {
+                        recipient_acc.balance += tx_clone.value;
+                    }
 
                     let mut written_storage = HashMap::new();
                     for (addr, slots) in &tx_clone.write_slots {
@@ -532,6 +594,29 @@ impl ParallelExecutor for GrevmExecutor {
                     if sender_acc.nonce != tx.nonce {
                         return Err(format!("Nonce mismatch for {:?}: expected {}, found {}", tx.sender, tx.nonce, sender_acc.nonce));
                     }
+                    // Pre-Execution Auto-Claim Pipeline (Task B):
+                    let auto_claim_amount = if let Ok(reg) = crate::registry::get_registry().read() {
+                        let mut claimed = std::collections::HashSet::new();
+                        for block in reg.lattice_blocks.values() {
+                            if let crate::stateless::LatticePayload::Receive { send_block_hash, .. } = &block.payload {
+                                claimed.insert(*send_block_hash);
+                            }
+                        }
+                        let mut pending = Vec::new();
+                        for (hash, block) in &reg.lattice_blocks {
+                            if let crate::stateless::LatticePayload::Send { recipient, amount } = &block.payload {
+                                if *recipient == tx.sender && !claimed.contains(hash) {
+                                    pending.push(*amount);
+                                }
+                            }
+                        }
+                        pending.sort_by(|a, b| b.cmp(a));
+                        pending.iter().take(20).sum::<alloy_primitives::U256>()
+                    } else {
+                        alloy_primitives::U256::ZERO
+                    };
+                    sender_acc.balance += auto_claim_amount;
+
                     if sender_acc.balance < tx.value {
                         return Err(format!("Insufficient balance for {:?}", tx.sender));
                     }
@@ -541,7 +626,15 @@ impl ParallelExecutor for GrevmExecutor {
                     trace.push(format!("WRITE Account {:?} Balance={:?} Nonce={}", tx.sender, sender_acc.balance, sender_acc.nonce));
 
                     let mut recipient_acc = db_clone.accounts.get(&tx.recipient).cloned().unwrap_or_default();
-                    recipient_acc.balance += tx.value;
+                    // Do NOT increase recipient_acc.balance if this is a block-lattice transfer (recipient has registered DID).
+                    let is_block_lattice = if let Ok(reg) = crate::registry::get_registry().read() {
+                        reg.address_to_did.contains_key(&tx.recipient)
+                    } else {
+                        false
+                    };
+                    if !is_block_lattice {
+                        recipient_acc.balance += tx.value;
+                    }
                     trace.push(format!("WRITE Account {:?} Balance={:?}", tx.recipient, recipient_acc.balance));
 
                     let mut write_slots: HashMap<Address, HashMap<U256, U256>> = HashMap::new();

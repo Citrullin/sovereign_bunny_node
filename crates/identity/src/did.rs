@@ -24,6 +24,14 @@ pub struct SovereignDidDocument {
     pub falcon_pubkey: Vec<u8>,
     /// Post-Quantum XMSS public key.
     pub xmss_pubkey: Vec<u8>,
+    /// Secp256k1 Schnorr public key.
+    pub secp256k1_schnorr_pubkey: Vec<u8>,
+    /// Secp256r1 public key.
+    pub secp256r1_pubkey: Vec<u8>,
+    /// Pasta curve public key.
+    pub pasta_pubkey: Vec<u8>,
+    /// BabyJubjub curve public key.
+    pub babyjubjub_pubkey: Vec<u8>,
     /// Recursive parent authority path.
     pub authority_path: Vec<String>,
     /// Explicit directed trust edges to other DIDs.
@@ -79,6 +87,10 @@ impl SovereignDidDocument {
             slh_dsa_pubkey: vec![],
             falcon_pubkey: vec![],
             xmss_pubkey: vec![],
+            secp256k1_schnorr_pubkey: vec![],
+            secp256r1_pubkey: vec![],
+            pasta_pubkey: vec![],
+            babyjubjub_pubkey: vec![],
             authority_path: vec![],
             trusted_authorities: HashSet::new(),
             raw_document: None,
@@ -101,13 +113,17 @@ impl SovereignDidDocument {
         derived.copy_from_slice(&hash[12..32]);
         let evm_address = Address::from(derived);
 
-        // Simulate remaining 6 public keys
+        // Simulate remaining 10 public keys
         let ed_pub = vec![0xed, 0x01, 4, 5];
         let bls_pub = vec![0xea, 0x01, 6, 7];
         let ml_pub = vec![0x93, 0x01, 8, 9];
         let slh_pub = vec![0x94, 0x01, 10, 11];
         let fal_pub = vec![0x92, 0x01, 12, 13];
         let xmss_pub = vec![0x95, 0x01, 14, 15];
+        let schnorr_pub = vec![0xe8, 0x01, 16, 17];
+        let r1_pub = vec![0xe9, 0x01, 18, 19];
+        let pasta_pub = vec![0x90, 0x01, 20, 21];
+        let baby_pub = vec![0x91, 0x01, 22, 23];
 
         let did_doc_json = serde_json::json!({
             "verificationMethod": [
@@ -118,6 +134,10 @@ impl SovereignDidDocument {
                 { "id": "#key-slhdsa", "type": "SlhDsaSha2128fVerificationKey2024", "publicKeyMultibase": format!("z{}", bs58::encode(&slh_pub).into_string()) },
                 { "id": "#key-falcon", "type": "Falcon512VerificationKey2024", "publicKeyMultibase": format!("z{}", bs58::encode(&fal_pub).into_string()) },
                 { "id": "#key-xmss", "type": "XmssSha2256VerificationKey2024", "publicKeyMultibase": format!("z{}", bs58::encode(&xmss_pub).into_string()) },
+                { "id": "#key-schnorr", "type": "EcdsaSecp256k1SchnorrVerificationKey2025", "publicKeyMultibase": format!("z{}", bs58::encode(&schnorr_pub).into_string()) },
+                { "id": "#key-secp256r1", "type": "EcdsaSecp256r1VerificationKey2020", "publicKeyMultibase": format!("z{}", bs58::encode(&r1_pub).into_string()) },
+                { "id": "#key-pasta", "type": "PastaVerificationKey2024", "publicKeyMultibase": format!("z{}", bs58::encode(&pasta_pub).into_string()) },
+                { "id": "#key-babyjubjub", "type": "BabyJubjubVerificationKey2024", "publicKeyMultibase": format!("z{}", bs58::encode(&baby_pub).into_string()) },
             ]
         });
 
@@ -144,6 +164,10 @@ impl SovereignDidDocument {
             slh_dsa_pubkey: vec![10, 11],
             falcon_pubkey: vec![12, 13],
             xmss_pubkey: vec![14, 15],
+            secp256k1_schnorr_pubkey: vec![16, 17],
+            secp256r1_pubkey: vec![18, 19],
+            pasta_pubkey: vec![20, 21],
+            babyjubjub_pubkey: vec![22, 23],
             authority_path: vec![],
             trusted_authorities: HashSet::new(),
             raw_document: Some(doc_comp),
@@ -189,6 +213,10 @@ impl SovereignDidDocument {
                 let mut slh_dsa_pubkey = vec![];
                 let mut falcon_pubkey = vec![];
                 let mut xmss_pubkey = vec![];
+                let mut secp256k1_schnorr_pubkey = vec![];
+                let mut secp256r1_pubkey = vec![];
+                let mut pasta_pubkey = vec![];
+                let mut babyjubjub_pubkey = vec![];
 
                 for vm in &doc_json.verification_method {
                     if vm.key_type == "EcdsaSecp256k1VerificationKey2019" {
@@ -227,6 +255,22 @@ impl SovereignDidDocument {
                         if let Some(pk_bytes) = decode_multibase_key(&vm.public_key_multibase, &[0x95, 0x01]) {
                             xmss_pubkey = pk_bytes;
                         }
+                    } else if vm.key_type == "EcdsaSecp256k1SchnorrVerificationKey2025" {
+                        if let Some(pk_bytes) = decode_multibase_key(&vm.public_key_multibase, &[0xe8, 0x01]) {
+                            secp256k1_schnorr_pubkey = pk_bytes;
+                        }
+                    } else if vm.key_type == "EcdsaSecp256r1VerificationKey2020" {
+                        if let Some(pk_bytes) = decode_multibase_key(&vm.public_key_multibase, &[0xe9, 0x01]) {
+                            secp256r1_pubkey = pk_bytes;
+                        }
+                    } else if vm.key_type == "PastaVerificationKey2024" {
+                        if let Some(pk_bytes) = decode_multibase_key(&vm.public_key_multibase, &[0x90, 0x01]) {
+                            pasta_pubkey = pk_bytes;
+                        }
+                    } else if vm.key_type == "BabyJubjubVerificationKey2024" {
+                        if let Some(pk_bytes) = decode_multibase_key(&vm.public_key_multibase, &[0x91, 0x01]) {
+                            babyjubjub_pubkey = pk_bytes;
+                        }
                     }
                 }
 
@@ -242,6 +286,10 @@ impl SovereignDidDocument {
                         slh_dsa_pubkey,
                         falcon_pubkey,
                         xmss_pubkey,
+                        secp256k1_schnorr_pubkey,
+                        secp256r1_pubkey,
+                        pasta_pubkey,
+                        babyjubjub_pubkey,
                         authority_path: vec![],
                         trusted_authorities: HashSet::new(),
                         raw_document: Some(doc_comp.to_string()),
@@ -270,6 +318,10 @@ impl SovereignDidDocument {
                                 slh_dsa_pubkey: vec![],
                                 falcon_pubkey: vec![],
                                 xmss_pubkey: vec![],
+                                secp256k1_schnorr_pubkey: vec![],
+                                secp256r1_pubkey: vec![],
+                                pasta_pubkey: vec![],
+                                babyjubjub_pubkey: vec![],
                                 authority_path: vec![],
                                 trusted_authorities: HashSet::new(),
                                 raw_document: None,
@@ -281,5 +333,55 @@ impl SovereignDidDocument {
         }
 
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_primitives::B256;
+
+    #[test]
+    fn test_identity_all_11_curves() {
+        let seed = B256::repeat_byte(0xab);
+        let doc = SovereignDidDocument::derive_from_seed(seed);
+        
+        // 1. Verify URI prefix formats
+        assert!(doc.did_uri.starts_with("did:peer:4"));
+        assert!(doc.short_form.starts_with("did:peer:4"));
+        
+        // 2. Verify all 11 public keys are successfully populated and mapped
+        assert!(!doc.secp256k1_pubkey.is_empty(), "secp256k1 should be populated");
+        assert_eq!(doc.ed25519_pubkey, vec![4, 5], "ed25519 mapping mismatch");
+        assert_eq!(doc.bls_pubkey, vec![6, 7], "bls mapping mismatch");
+        assert_eq!(doc.ml_dsa_pubkey, vec![8, 9], "mldsa mapping mismatch");
+        assert_eq!(doc.slh_dsa_pubkey, vec![10, 11], "slhdsa mapping mismatch");
+        assert_eq!(doc.falcon_pubkey, vec![12, 13], "falcon mapping mismatch");
+        assert_eq!(doc.xmss_pubkey, vec![14, 15], "xmss mapping mismatch");
+        assert_eq!(doc.secp256k1_schnorr_pubkey, vec![16, 17], "secp256k1_schnorr mapping mismatch");
+        assert_eq!(doc.secp256r1_pubkey, vec![18, 19], "secp256r1 mapping mismatch");
+        assert_eq!(doc.pasta_pubkey, vec![20, 21], "pasta mapping mismatch");
+        assert_eq!(doc.babyjubjub_pubkey, vec![22, 23], "babyjubjub mapping mismatch");
+
+        // 3. Verify JSON-LD document round-trip resolution
+        let resolved = SovereignDidDocument::from_did_string(&doc.did_uri).unwrap();
+        assert_eq!(resolved.did_uri, doc.did_uri);
+        assert_eq!(resolved.evm_address, doc.evm_address);
+        assert_eq!(resolved.secp256k1_pubkey, doc.secp256k1_pubkey);
+        assert_eq!(resolved.ed25519_pubkey, doc.ed25519_pubkey);
+        assert_eq!(resolved.bls_pubkey, doc.bls_pubkey);
+        assert_eq!(resolved.secp256k1_schnorr_pubkey, doc.secp256k1_schnorr_pubkey);
+        assert_eq!(resolved.secp256r1_pubkey, doc.secp256r1_pubkey);
+        assert_eq!(resolved.pasta_pubkey, doc.pasta_pubkey);
+        assert_eq!(resolved.babyjubjub_pubkey, doc.babyjubjub_pubkey);
+    }
+
+    #[test]
+    fn test_identity_sovereign_placeholder() {
+        let did = "did:sovereign:12345:0x9858effd232b4033e47d90003d41ec34ecaeda94";
+        let doc = SovereignDidDocument::from_did_string(did).unwrap();
+        assert_eq!(doc.did_uri, did);
+        assert_eq!(doc.short_form, "9858effd232b4033e47d90003d41ec34ecaeda94");
+        assert_eq!(doc.evm_address, "0x9858effd232b4033e47d90003d41ec34ecaeda94".parse::<Address>().unwrap());
     }
 }

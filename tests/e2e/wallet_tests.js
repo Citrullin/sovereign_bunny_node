@@ -125,21 +125,21 @@ async function rpcCall(method, params, headers = {}) {
   return response.json();
 }
 
-function getDidCliPath() {
+function getDidToolPath() {
   const paths = [
-    path.resolve(__dirname, '../../target/debug/did-cli'),
-    path.resolve(__dirname, '../../target/release/did-cli'),
-    path.resolve(__dirname, '../target/debug/did-cli'),
-    path.resolve(__dirname, '../target/release/did-cli'),
-    path.resolve('target/debug/did-cli'),
-    path.resolve('target/release/did-cli'),
+    path.resolve(__dirname, '../../target/debug/did-tool'),
+    path.resolve(__dirname, '../../target/release/did-tool'),
+    path.resolve(__dirname, '../target/debug/did-tool'),
+    path.resolve(__dirname, '../target/release/did-tool'),
+    path.resolve('target/debug/did-tool'),
+    path.resolve('target/release/did-tool'),
   ];
   for (const p of paths) {
     if (fs.existsSync(p)) {
       return p;
     }
   }
-  throw new Error("did-cli binary not found!");
+  throw new Error("did-tool binary not found!");
 }
 
 async function runTests() {
@@ -238,7 +238,7 @@ async function runTests() {
   // Test 10: Legacy Rabby Proxy translation
   console.log('\n🧪 Test 10: Verifying legacy wallet translation proxy (eth_getBalance & eth_getTransactionCount)...');
   const SENDER_A = '0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266';
-  const RECEIVER_B = '0x918c30482462c8024ba6cf34a18ba1f8bbdb755f';
+  const RECEIVER_B = '0xa11b4bafdad6661fc5ab1a3fd47bb4653c22ce83';
   const SENDER_A_PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 
   const resLegacyBal = await rpcCall('eth_getBalance', [SENDER_A, 'latest']);
@@ -260,9 +260,9 @@ async function runTests() {
   // Test 11: Transaction History Verification with Time Delay (Simulating Reality)
   console.log('\n🧪 Test 11: Verifying legacy transaction history proxy with time delay and receiver scanning...');
 
-  // Sign a real transaction dynamically via did-cli
-  console.log('  ✍️ Signing legacy transaction using did-cli tool...');
-  const didCliPath = getDidCliPath();
+  // Sign a real transaction dynamically via did-tool
+  console.log('  ✍️ Signing legacy transaction using did-tool...');
+  const didToolPath = getDidToolPath();
   const valueToSend = 1000000000000000000n; // 1 ETH in wei
   const gasLimit = 21000;
   const gasPrice = 1000000000; // 1 gwei
@@ -271,13 +271,23 @@ async function runTests() {
   const chainId = parseInt(resChainId.result, 16);
   console.log(`  Detected Chain ID: ${chainId}`);
 
-  const cmd = `"${didCliPath}" sign-tx --private-key ${SENDER_A_PK} --to ${RECEIVER_B} --value ${valueToSend} --nonce ${initialSenderNonce} --gas-limit ${gasLimit} --gas-price ${gasPrice} --chain-id ${chainId}`;
-  const signedRawTx = execSync(cmd).toString().trim();
-  console.log(`  Signed raw transaction generated successfully.`);
+  const cmd = `"${didToolPath}" sign-tx --private-key ${SENDER_A_PK} --to ${RECEIVER_B} --value ${valueToSend} --nonce ${initialSenderNonce} --gas-limit ${gasLimit} --gas-price ${gasPrice} --chain-id ${chainId}`;
+  const output = execSync(cmd).toString().trim();
+  console.log(`  did-tool output: ${output}`);
 
-  // Submit the dynamic transaction (Sender)
-  const resSendTx = await rpcCall('eth_sendRawTransaction', [signedRawTx]);
-  const txHash = resSendTx.result;
+  let txHash;
+  if (output.includes('Broadcast Succeeded!')) {
+      const match = output.match(/Tx Hash: "([^"]+)"/) || output.match(/Tx Hash: ([0-9a-fA-Fx]+)/);
+      if (match) {
+          txHash = match[1];
+      }
+  }
+  if (!txHash) {
+      const match = output.match(/Signed Transaction Hex: (0x[0-9a-fA-F]+)/);
+      const signedRawTx = match ? match[1] : output;
+      const resSendTx = await rpcCall('eth_sendRawTransaction', [signedRawTx]);
+      txHash = resSendTx.result;
+  }
   assert.ok(txHash && txHash.startsWith('0x'), "Must return valid transaction hash");
   console.log(`  Sent transaction hash: ${txHash}`);
 

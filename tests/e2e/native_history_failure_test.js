@@ -15,7 +15,7 @@ const ALICE_ADDR = '0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266';
 
 // Bob (Receiver) configuration
 const BOB_DID = 'did:peer:2.VzQ3shjBj7WwKgYTt2wz9LaBFCoUCJ3rdjk7NLVxFjmT2HKxiW.Vz6Mkgw6zXCvr5woFMe53hn9HTxaPJXZVM6f3pR84wrU2un41';
-const BOB_ADDR = '0x918c30482462c8024ba6cf34a18ba1f8bbdb755f';
+const BOB_ADDR = '0xa11b4bafdad6661fc5ab1a3fd47bb4653c22ce82';
 
 async function rpcCall(method, params, headers = {}) {
   const response = await fetch(RPC_URL, {
@@ -66,7 +66,7 @@ async function run() {
   // 2. NATIVE TRANSFER: Alice signs a raw NATIVE transfer payload using did-cli
   console.log('2. Signing and submitting raw native transfer payload (no contracts)...');
   const value = 1000000000000000000n; // 1 ETH in Wei
-  const signCmd = `./target/debug/did-cli sign-tx --private-key "${ALICE_PK}" --to "${BOB_ADDR}" --value ${value} --nonce ${nonce} --chain-id ${chainId}`;
+  const signCmd = `./target/debug/did-tool sign-tx --private-key "${ALICE_PK}" --to "${BOB_ADDR}" --value ${value} --nonce ${nonce} --chain-id ${chainId}`;
   const signedRawTx = execSync(signCmd).toString().trim();
   
   const resSendTx = await rpcCall('eth_sendRawTransaction', [signedRawTx]);
@@ -145,7 +145,7 @@ async function run() {
   const nextNonceRes = await rpcCall('eth_getTransactionCount', [ALICE_ADDR, 'latest']);
   const nextNonce = parseInt(nextNonceRes.result, 16);
   
-  const signCmd2 = `./target/debug/did-cli sign-tx --private-key "${ALICE_PK}" --to "${BOB_ADDR}" --value ${value} --nonce ${nextNonce} --chain-id ${chainId}`;
+  const signCmd2 = `./target/debug/did-tool sign-tx --private-key "${ALICE_PK}" --to "${BOB_ADDR}" --value ${value} --nonce ${nextNonce} --chain-id ${chainId}`;
   const signedRawTx2 = execSync(signCmd2).toString().trim();
   
   // Submit with Bob's DID (which is a placeholder) as X-Sovereign-Did

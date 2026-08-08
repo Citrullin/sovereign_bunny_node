@@ -1,7 +1,24 @@
 //! `DPoT` Validator Directory module.
 
-use alloy_primitives::Address;
+use alloy_primitives::{Address, B256};
 use std::collections::{HashMap, HashSet};
+
+/// Represents the state frontier of an account chain in the block-lattice.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AccountFrontier {
+    /// Latest block hash of the account's chain.
+    pub latest_hash: B256,
+    /// Latest sequence number of the account's chain.
+    pub sequence: u64,
+    /// Lock status of the account (for synchronous cross-account calls).
+    pub locked: bool,
+    /// Timestamp when the account was locked.
+    pub locked_at: u64,
+    /// Paused zkEVM execution context.
+    pub paused_context: Option<Vec<u8>>,
+    /// Size of the paused context snapshot.
+    pub snapshot_size: usize,
+}
 
 /// Represents the type of a validator in the `DPoT` system.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +66,10 @@ pub struct ValidatorRegistry {
     pub identities: HashMap<String, RegisteredIdentity>,
     /// Chain ID of the node.
     pub chain_id: u64,
+    /// Map of Address to their AccountFrontier state in the block-lattice.
+    pub account_frontiers: HashMap<Address, AccountFrontier>,
+    /// Global registry of all submitted block-lattice blocks.
+    pub lattice_blocks: HashMap<B256, crate::stateless::LatticeBlock>,
 }
 
 impl Default for ValidatorRegistry {
@@ -80,12 +101,31 @@ impl ValidatorRegistry {
             dynamic_cfg,
             identities: HashMap::new(),
             chain_id: 1337,
+            account_frontiers: HashMap::new(),
+            lattice_blocks: HashMap::new(),
         }
     }
 
     /// Returns the registered DID of an address.
     pub fn get_did_by_address(&self, address: &Address) -> Option<String> {
         self.address_to_did.get(address).cloned()
+    }
+
+    /// Gets or creates a default frontier for the given account address.
+    pub fn get_or_create_frontier(&mut self, address: Address) -> AccountFrontier {
+        self.account_frontiers.entry(address).or_insert_with(|| AccountFrontier {
+            latest_hash: B256::ZERO,
+            sequence: 0,
+            locked: false,
+            locked_at: 0,
+            paused_context: None,
+            snapshot_size: 0,
+        }).clone()
+    }
+
+    /// Updates the frontier for the given account address.
+    pub fn update_frontier(&mut self, address: Address, frontier: AccountFrontier) {
+        self.account_frontiers.insert(address, frontier);
     }
 
     /// Helper to normalize a query DID string (prepending did:peer: if it starts with 4zQm or z).
@@ -96,7 +136,11 @@ impl ValidatorRegistry {
             if parts.len() == 4 {
                 let id = parts[3];
                 if !id.starts_with("0x") {
-                    return format!("did:peer:{}", id);
+                    if !id.starts_with('4') {
+                        return format!("did:peer:4{}", id);
+                    } else {
+                        return format!("did:peer:{}", id);
+                    }
                 }
             }
         }

@@ -11,7 +11,7 @@ use reth_ethereum::{
     node::{api::FullNodeComponents, node::EthereumAddOns, EthereumNode},
 };
 use reth_exex::{ExExContext, ExExEvent, ExExNotification};
-use reth_node_builder::components::NoopConsensusBuilder;
+use reth_node_builder::{components::NoopConsensusBuilder, WithLaunchContext};
 use reth_node_core::args::DefaultEngineValues;
 use reth_primitives_traits::AlloyBlockHeader;
 use std::future::Future;
@@ -424,5 +424,5 @@ connectivity_decay_penalty = 0.10
         assert!(response.contains("did_uri"));
         assert!(response.contains(&did_uri));
     }
-
 }
+

@@ -9,8 +9,8 @@ name = "sovereign-reth"
 path = "src/main.rs"
 
 [[bin]]
-name = "did-cli"
-path = "src/did_cli.rs"
+name = "did-tool"
+path = "src/did_tool.rs"
 
 [dependencies]
 tokio = { workspace = true }
@@ -31,6 +31,7 @@ bip39 = "2.0.0"
 bip32 = "0.5.1"
 alloy-signer-local = "2.1.1"
 alloy-network = "2.1.1"
+scale = { workspace = true }
 
 
 tiny-keccak = { workspace = true }

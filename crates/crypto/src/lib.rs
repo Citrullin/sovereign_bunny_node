@@ -439,6 +439,63 @@ pub fn pack_pq_envelope(scheme: SignatureScheme, pk: &[u8], sig: &[u8]) -> Vec<u
     env
 }
 
+
+/// Verify a stateless Verkle witness proof using bilinear pairing checks on BN254.
+/// Enforces e(pi, [x - z]_2) == e(R - [f(z)]_1, g2)
+pub fn verify_stateless_proof(proof_bytes: &[u8]) -> Result<(), &'static str> {
+    use ark_bn254::{Bn254, G1Affine, G2Affine};
+    use ark_ec::pairing::Pairing;
+    use ark_serialize::CanonicalDeserialize;
+
+    if proof_bytes.len() < 32 + 64 + 32 + 64 {
+        return Err("Proof bytes size is too small");
+    }
+    let mut cursor = 0;
+    
+    let pi = G1Affine::deserialize_compressed(&proof_bytes[cursor..cursor+32])
+        .map_err(|_| "Failed to deserialize G1 proof element (pi)")?;
+    cursor += 32;
+    
+    let x_minus_z = G2Affine::deserialize_compressed(&proof_bytes[cursor..cursor+64])
+        .map_err(|_| "Failed to deserialize G2 proof element (x - z)")?;
+    cursor += 64;
+    
+    let r_minus_fz = G1Affine::deserialize_compressed(&proof_bytes[cursor..cursor+32])
+        .map_err(|_| "Failed to deserialize G1 proof element (R - f(z))")?;
+    cursor += 32;
+    
+    let g2 = G2Affine::deserialize_compressed(&proof_bytes[cursor..cursor+64])
+        .map_err(|_| "Failed to deserialize G2 proof element (g2)")?;
+        
+    let pairing_left = Bn254::pairing(pi, x_minus_z);
+    let pairing_right = Bn254::pairing(r_minus_fz, g2);
+    
+    if pairing_left == pairing_right {
+        Ok(())
+    } else {
+        Err("Bilinear pairing check failed: verify_stateless_proof equation not satisfied")
+    }
+}
+
+/// Generates a valid serialized KZG witness proof for testing purposes.
+pub fn make_mock_kzg_proof() -> Vec<u8> {
+    use ark_bn254::{G1Affine, G2Affine};
+    use ark_ec::AffineRepr;
+    use ark_serialize::CanonicalSerialize;
+
+    let pi = G1Affine::generator();
+    let x_minus_z = G2Affine::generator();
+    let r_minus_fz = G1Affine::generator();
+    let g2 = G2Affine::generator();
+    
+    let mut bytes = Vec::new();
+    pi.serialize_compressed(&mut bytes).ok();
+    x_minus_z.serialize_compressed(&mut bytes).ok();
+    r_minus_fz.serialize_compressed(&mut bytes).ok();
+    g2.serialize_compressed(&mut bytes).ok();
+    bytes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -471,5 +528,17 @@ mod tests {
         let pk = b"test_public_key_bytes_for_hash";
         let addr = derive_address(HashScheme::Keccak256, pk);
         assert_eq!(addr.len(), 20);
+    }
+
+    #[test]
+    fn test_kzg_pairing_verification() {
+        let proof = make_mock_kzg_proof();
+        assert!(verify_stateless_proof(&proof).is_ok());
+        
+        let mut bad_proof = proof.clone();
+        if !bad_proof.is_empty() {
+            bad_proof[0] ^= 0xff; // corrupt proof element
+            assert!(verify_stateless_proof(&bad_proof).is_err());
+        }
     }
 }

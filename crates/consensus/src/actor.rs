@@ -40,7 +40,7 @@ impl CrossManifoldActor {
     /// Initializes a new Cross-Manifold Actor in `InitiateIntent` state.
     pub fn new(actor_id: B256, sender: Address, recipient: Address, amount: U256, current_time: u64) -> Self {
         let registry_lock = crate::registry::get_registry();
-        let timeout = if let Ok(reg) = registry_lock.read() {
+        let timeout = if let Ok(reg) = registry_lock.try_read() {
             reg.dynamic_cfg.read().unwrap().saga_intent_timeout_seconds
         } else {
             86400
@@ -89,7 +89,7 @@ impl CrossManifoldActor {
     /// Evaluates timeout conditions and auto-triggers Rollback if expired.
     pub fn evaluate_timeout(&mut self, current_time: u64) -> bool {
         let registry_lock = crate::registry::get_registry();
-        let timeout = if let Ok(reg) = registry_lock.read() {
+        let timeout = if let Ok(reg) = registry_lock.try_read() {
             reg.dynamic_cfg.read().unwrap().saga_intent_timeout_seconds
         } else {
             self.timeout_seconds

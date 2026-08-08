@@ -9,7 +9,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 echo "🛠️  Building Sovereign-Reth..."
-cargo build --bin sovereign-reth --bin did-cli --config 'build.rustc-workspace-wrapper=""' -j 1
+cargo build --bin sovereign-reth --bin did-tool --config 'build.rustc-workspace-wrapper=""' -j 1
 
 # Cleanup function to kill background node
 cleanup() {
