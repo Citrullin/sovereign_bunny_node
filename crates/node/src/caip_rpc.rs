@@ -108,6 +108,45 @@ fn insert_synthetic_receipt(tx_hash: B256, sender: Address) {
     get_synthetic_receipts().write().unwrap().insert(tx_hash, sender);
 }
 
+static SYNTHETIC_TX_HASHES: OnceLock<RwLock<HashMap<B256, B256>>> = OnceLock::new();
+
+fn get_synthetic_tx_hashes() -> &'static RwLock<HashMap<B256, B256>> {
+    SYNTHETIC_TX_HASHES.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+#[derive(Debug, Clone)]
+pub struct SyntheticMeta {
+    pub original_sender: Address,
+    pub receiver: Address,
+    pub inbox_value: U256,
+    pub nonce: u64,
+    pub block_hash: B256,
+    pub block_number: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct OutboundSendMeta {
+    pub sender: Address,
+    pub recipient: Address,
+    pub amount: U256,
+    pub nonce: u64,
+    pub gas_price: U256,
+    pub virtual_block_hash: B256,
+    pub virtual_block_number: u64,
+}
+
+static SYNTHETIC_META: OnceLock<RwLock<HashMap<B256, SyntheticMeta>>> = OnceLock::new();
+
+pub fn get_synthetic_meta() -> &'static RwLock<HashMap<B256, SyntheticMeta>> {
+    SYNTHETIC_META.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+static OUTBOUND_META: OnceLock<RwLock<HashMap<B256, OutboundSendMeta>>> = OnceLock::new();
+
+pub fn get_outbound_meta() -> &'static RwLock<HashMap<B256, OutboundSendMeta>> {
+    OUTBOUND_META.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
 /// CAIP-2 Chain Identifier
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Caip2ChainId {
@@ -571,6 +610,13 @@ pub async fn run_proxy(port: u16, reth_port: u16, chain_id: u64) -> Result<(), e
                     continue;
                 }
 
+                if method == "eth_getTransactionCount" {
+                    let address = body_json["params"][0].as_str().unwrap_or("").parse::<Address>().unwrap_or_default();
+                    let count = handle_get_transaction_count(reth_port, address).await;
+                    send_result(&mut client_stream, &id, json!(format!("0x{:x}", count))).await;
+                    continue;
+                }
+
                 if method == "sovereign_registerDidKeys" {
                     let did_uri = body_json["params"][0].as_str().unwrap_or("");
                     {
@@ -654,7 +700,7 @@ pub async fn run_proxy(port: u16, reth_port: u16, chain_id: u64) -> Result<(), e
                         }
                     }
 
-                    if let Some((sender, gas_price, gas_limit, value)) = decode_tx_details(raw_tx) {
+                    if let Some((sender, gas_price, gas_limit, value, tx_nonce)) = decode_tx_details(raw_tx) {
                         let upfront_cost = value.saturating_add(gas_price.saturating_mul(U256::from(gas_limit)));
                         let settled_balance = get_reth_balance(reth_port, sender).await;
                         let effective_balance = settled_balance.saturating_add(inbox_value);
@@ -687,13 +733,35 @@ pub async fn run_proxy(port: u16, reth_port: u16, chain_id: u64) -> Result<(), e
                             }
 
                             if is_pure_self_send && inbox_value > 0 {
-                                // Zero-gas sweep: credit the user directly and return success
-                                if let Err(e) = send_funding_tx(reth_port, sender, inbox_value).await {
-                                    send_error(&mut client_stream, &id, -32603, &format!("Zero-gas sweep credit failed: {e}")).await;
-                                    continue;
-                                }
+                                 let funding_tx_hash = match send_funding_tx(reth_port, sender, inbox_value).await {
+                                     Ok(h) => h,
+                                     Err(e) => {
+                                         send_error(&mut client_stream, &id, -32603, &format!("Zero-gas sweep credit failed: {e}")).await;
+                                         continue;
+                                     }
+                                 };
 
-                                let synthetic_hash = B256::random();
+                                 let synthetic_hash = B256::random();
+                                 get_synthetic_tx_hashes().write().unwrap().insert(funding_tx_hash, synthetic_hash);
+
+                                 let mut original_sender = Address::ZERO;
+                                 if let Ok(reg) = get_registry().read() {
+                                     if let Some(first_hash) = unclaimed_hashes.first() {
+                                         if let Some(block) = reg.lattice_blocks.get(first_hash) {
+                                             original_sender = block.account;
+                                         }
+                                     }
+                                 }
+
+                                 let meta = SyntheticMeta {
+                                     original_sender,
+                                     receiver: sender,
+                                     inbox_value,
+                                     nonce: tx_nonce,
+                                     block_hash: B256::ZERO,
+                                     block_number: 0,
+                                 };
+                                 get_synthetic_meta().write().unwrap().insert(synthetic_hash, meta);
                                 {
                                     let mut reg = get_registry().write().unwrap();
                                     if let Some(frontier) = reg.account_frontiers.get_mut(&sender) {
@@ -749,12 +817,35 @@ pub async fn run_proxy(port: u16, reth_port: u16, chain_id: u64) -> Result<(), e
                             // If they have enough settled balance, but they are doing a self-send sweep,
                             // or have unclaimed inbox, we still mark the inbox as claimed in the registry!
                             if is_pure_self_send && inbox_value > 0 {
-                                if let Err(e) = send_funding_tx(reth_port, sender, inbox_value).await {
-                                    send_error(&mut client_stream, &id, -32603, &format!("Zero-gas sweep credit failed: {e}")).await;
-                                    continue;
-                                }
+                                 let funding_tx_hash = match send_funding_tx(reth_port, sender, inbox_value).await {
+                                     Ok(h) => h,
+                                     Err(e) => {
+                                         send_error(&mut client_stream, &id, -32603, &format!("Zero-gas sweep credit failed: {e}")).await;
+                                         continue;
+                                     }
+                                 };
 
-                                let synthetic_hash = B256::random();
+                                 let synthetic_hash = B256::random();
+                                 get_synthetic_tx_hashes().write().unwrap().insert(funding_tx_hash, synthetic_hash);
+
+                                 let mut original_sender = Address::ZERO;
+                                 if let Ok(reg) = get_registry().read() {
+                                     if let Some(first_hash) = unclaimed_hashes.first() {
+                                         if let Some(block) = reg.lattice_blocks.get(first_hash) {
+                                             original_sender = block.account;
+                                         }
+                                     }
+                                 }
+
+                                 let meta = SyntheticMeta {
+                                     original_sender,
+                                     receiver: sender,
+                                     inbox_value,
+                                     nonce: tx_nonce,
+                                     block_hash: B256::ZERO,
+                                     block_number: 0,
+                                 };
+                                 get_synthetic_meta().write().unwrap().insert(synthetic_hash, meta);
                                 {
                                     let mut reg = get_registry().write().unwrap();
                                     if let Some(frontier) = reg.account_frontiers.get_mut(&sender) {
@@ -799,12 +890,55 @@ pub async fn run_proxy(port: u16, reth_port: u16, chain_id: u64) -> Result<(), e
                             }
                             if let Some(sender) = sender_opt {
                                 index_from_raw_tx(raw_tx, tx_hash, sender);
+
+                                if let Some((sender, gas_price, _gas_limit, value, tx_nonce)) = decode_tx_details(raw_tx) {
+                                    let mut is_standard_send = false;
+                                    let mut recipient = Address::ZERO;
+                                    if let Some(stripped) = raw_tx.strip_prefix("0x") {
+                                        if let Ok(bytes) = alloy_primitives::hex::decode(stripped) {
+                                            let mut data = &bytes[..];
+                                            if let Ok(tx) = <TxEnvelope as Decodable>::decode(&mut data) {
+                                                if let Some(to) = tx.to() {
+                                                    if to != sender && tx.input().is_empty() && tx.value() > U256::ZERO {
+                                                        is_standard_send = true;
+                                                        recipient = to;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if is_standard_send {
+                                        let meta = OutboundSendMeta {
+                                            sender,
+                                            recipient,
+                                            amount: value,
+                                            nonce: tx_nonce,
+                                            gas_price,
+                                            virtual_block_hash: B256::ZERO,
+                                            virtual_block_number: 0,
+                                        };
+                                        get_outbound_meta().write().unwrap().insert(tx_hash, meta);
+                                    }
+                                }
                             }
                         }
                     }
 
                     send_result(&mut client_stream, &id, fwd_result).await;
                     continue;
+                }
+
+                // Intercept eth_estimateGas for stateless pure self-sends
+                if method == "eth_estimateGas" {
+                    if let Some(param) = body_json["params"].get(0) {
+                        let from = param["from"].as_str().unwrap_or("");
+                        let to = param["to"].as_str().unwrap_or("");
+                        let data = param["data"].as_str().or_else(|| param["input"].as_str()).unwrap_or("");
+                        if !from.is_empty() && from.eq_ignore_ascii_case(to) && (data.is_empty() || data == "0x") {
+                            send_result(&mut client_stream, &id, json!("0x5208")).await;
+                            continue;
+                        }
+                    }
                 }
 
                 // Intercept eth_getBlockByNumber to reconstruct blocks from Verkle witnesses
@@ -825,6 +959,63 @@ pub async fn run_proxy(port: u16, reth_port: u16, chain_id: u64) -> Result<(), e
                 // Intercept eth_getTransactionByHash for stateless fallback
                 if method == "eth_getTransactionByHash" {
                     sync_hot_storage(reth_port).await;
+                    let requested_hash = body_json["params"][0].as_str().unwrap_or("");
+                    if let Ok(tx_hash) = requested_hash.parse::<B256>() {
+                        let mut lookup_hash = tx_hash;
+                        let synthetic_opt = get_synthetic_tx_hashes().read().unwrap().get(&tx_hash).copied();
+                        if let Some(synth_hash) = synthetic_opt {
+                            lookup_hash = synth_hash;
+                        }
+
+                        let synthetic_meta_opt = get_synthetic_meta().read().unwrap().get(&lookup_hash).cloned();
+                        if let Some(meta) = synthetic_meta_opt {
+                            let tx_obj = json!({
+                                "hash": format!("{tx_hash:#x}"),
+                                "from": format!("{:#x}", meta.original_sender),
+                                "to": format!("{:#x}", meta.receiver),
+                                "value": format!("0x{:x}", meta.inbox_value),
+                                "nonce": format!("0x{:x}", meta.nonce),
+                                "gas": "0x5208",
+                                "gasPrice": "0x0",
+                                "input": "0x",
+                                "blockHash": format!("{:#x}", meta.block_hash),
+                                "blockNumber": format!("0x{:x}", meta.block_number),
+                                "transactionIndex": "0x0",
+                                "type": "0x2",
+                                "v": "0x1c",
+                                "r": "0x0",
+                                "s": "0x0"
+                            });
+                            let body = json!({ "jsonrpc": "2.0", "result": tx_obj, "id": id }).to_string();
+                            write_json(&mut client_stream, &body).await;
+                            continue;
+                        }
+
+                        let outbound_meta_opt = get_outbound_meta().read().unwrap().get(&tx_hash).cloned();
+                        if let Some(meta) = outbound_meta_opt {
+                            let tx_obj = json!({
+                                "hash": format!("{tx_hash:#x}"),
+                                "from": format!("{:#x}", meta.sender),
+                                "to": format!("{:#x}", meta.recipient),
+                                "value": format!("0x{:x}", meta.amount),
+                                "nonce": format!("0x{:x}", meta.nonce),
+                                "gas": "0x5208",
+                                "gasPrice": format!("0x{:x}", meta.gas_price),
+                                "input": "0x",
+                                "blockHash": format!("{:#x}", meta.virtual_block_hash),
+                                "blockNumber": format!("0x{:x}", meta.virtual_block_number),
+                                "transactionIndex": "0x0",
+                                "type": "0x2",
+                                "v": "0x1c",
+                                "r": "0x0",
+                                "s": "0x0"
+                            });
+                            let body = json!({ "jsonrpc": "2.0", "result": tx_obj, "id": id }).to_string();
+                            write_json(&mut client_stream, &body).await;
+                            continue;
+                        }
+                    }
+
                     let reth_res = forward_to_reth_http(reth_port, &body_json).await.ok();
                     let has_result = reth_res.as_ref()
                         .and_then(|r| r.get("result"))
@@ -838,7 +1029,6 @@ pub async fn run_proxy(port: u16, reth_port: u16, chain_id: u64) -> Result<(), e
                         }
                     }
 
-                    let requested_hash = body_json["params"][0].as_str().unwrap_or("");
                     let tx_obj = get_tx_by_hash(requested_hash);
                     let body = json!({ "jsonrpc": "2.0", "result": tx_obj, "id": id }).to_string();
                     write_json(&mut client_stream, &body).await;
@@ -849,22 +1039,68 @@ pub async fn run_proxy(port: u16, reth_port: u16, chain_id: u64) -> Result<(), e
                 if method == "eth_getTransactionReceipt" {
                     let requested_hash = body_json["params"][0].as_str().unwrap_or("");
                     if let Ok(tx_hash) = requested_hash.parse::<B256>() {
-                        let sender_opt = get_synthetic_receipts().read().unwrap().get(&tx_hash).copied();
-                        if let Some(sender) = sender_opt {
+                        let mut lookup_hash = tx_hash;
+                        let synthetic_opt = get_synthetic_tx_hashes().read().unwrap().get(&tx_hash).copied();
+                        if let Some(synth_hash) = synthetic_opt {
+                            lookup_hash = synth_hash;
+                        }
+
+                        let synthetic_meta_opt = get_synthetic_meta().read().unwrap().get(&lookup_hash).cloned();
+                        if let Some(meta) = synthetic_meta_opt {
                             let receipt = json!({
                                 "transactionHash": format!("{tx_hash:#x}"),
                                 "transactionIndex": "0x0",
-                                "blockHash": format!("{:#x}", B256::random()),
-                                "blockNumber": "0x1",
-                                "from": format!("{sender:#x}"),
-                                "to": format!("{sender:#x}"),
-                                "cumulativeGasUsed": "0x0",
-                                "gasUsed": "0x0",
+                                "blockHash": format!("{:#x}", meta.block_hash),
+                                "blockNumber": format!("0x{:x}", meta.block_number),
+                                "from": format!("{:#x}", meta.original_sender),
+                                "to": format!("{:#x}", meta.receiver),
+                                "cumulativeGasUsed": "0x5208",
+                                "gasUsed": "0x5208",
+                                "effectiveGasPrice": "0x0",
                                 "contractAddress": null,
-                                "logs": [],
-                                "logsBloom": "0x000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
                                 "status": "0x1",
-                                "type": "0x0"
+                                "type": "0x2",
+                                "logs": [
+                                    {
+                                        "address": format!("{:#x}", meta.receiver),
+                                        "topics": [
+                                            "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef", // Transfer(address,address,uint256)
+                                            format!("0x000000000000000000000000{:x}", meta.original_sender),
+                                            format!("0x000000000000000000000000{:x}", meta.receiver)
+                                        ],
+                                        "data": format!("0x{:064x}", meta.inbox_value),
+                                        "blockNumber": format!("0x{:x}", meta.block_number),
+                                        "transactionHash": format!("{tx_hash:#x}"),
+                                        "transactionIndex": "0x0",
+                                        "blockHash": format!("{:#x}", meta.block_hash),
+                                        "logIndex": "0x0",
+                                        "removed": false
+                                    }
+                                ],
+                                "logsBloom": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+                            });
+                            let body = json!({ "jsonrpc": "2.0", "result": receipt, "id": id }).to_string();
+                            write_json(&mut client_stream, &body).await;
+                            continue;
+                        }
+
+                        let outbound_meta_opt = get_outbound_meta().read().unwrap().get(&tx_hash).cloned();
+                        if let Some(meta) = outbound_meta_opt {
+                            let receipt = json!({
+                                "transactionHash": format!("{tx_hash:#x}"),
+                                "transactionIndex": "0x0",
+                                "blockHash": format!("{:#x}", meta.virtual_block_hash),
+                                "blockNumber": format!("0x{:x}", meta.virtual_block_number),
+                                "from": format!("{:#x}", meta.sender),
+                                "to": format!("{:#x}", meta.recipient),
+                                "cumulativeGasUsed": "0x5208",
+                                "gasUsed": "0x5208",
+                                "effectiveGasPrice": format!("0x{:x}", meta.gas_price),
+                                "contractAddress": null,
+                                "status": "0x1",
+                                "type": "0x2",
+                                "logs": [],
+                                "logsBloom": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
                             });
                             let body = json!({ "jsonrpc": "2.0", "result": receipt, "id": id }).to_string();
                             write_json(&mut client_stream, &body).await;
@@ -1231,7 +1467,7 @@ fn decode_sender(raw_tx: &str) -> Option<Address> {
     tx.recover_signer_unchecked().ok()
 }
 
-fn decode_tx_details(raw_tx: &str) -> Option<(Address, U256, u64, U256)> {
+fn decode_tx_details(raw_tx: &str) -> Option<(Address, U256, u64, U256, u64)> {
     let stripped = raw_tx.strip_prefix("0x")?;
     let bytes = alloy_primitives::hex::decode(stripped).ok()?;
     let mut data = &bytes[..];
@@ -1240,7 +1476,7 @@ fn decode_tx_details(raw_tx: &str) -> Option<(Address, U256, u64, U256)> {
     let gas_price = tx.max_fee_per_gas();
     let gas_limit = tx.gas_limit();
     let value = tx.value();
-    Some((sender, U256::from(gas_price), gas_limit, value))
+    Some((sender, U256::from(gas_price), gas_limit, value, tx.nonce()))
 }
 
 async fn get_reth_balance(reth_port: u16, addr: Address) -> U256 {
@@ -1264,7 +1500,7 @@ async fn get_reth_balance(reth_port: u16, addr: Address) -> U256 {
     U256::ZERO
 }
 
-async fn send_funding_tx(reth_port: u16, target: Address, value: U256) -> Result<(), eyre::Error> {
+async fn send_funding_tx(reth_port: u16, target: Address, value: U256) -> Result<B256, eyre::Error> {
     // 1. Get dev nonce
     let client = reqwest::Client::new();
     let nonce_res = client.post(format!("http://127.0.0.1:{reth_port}"))
@@ -1303,6 +1539,7 @@ async fn send_funding_tx(reth_port: u16, target: Address, value: U256) -> Result
     // 4. Encode signed transaction
     let mut encoded = Vec::new();
     signed_tx.encode(&mut encoded);
+    let tx_hash = alloy_primitives::keccak256(&encoded);
     let hex_tx = format!("0x{}", alloy_primitives::hex::encode(encoded));
 
     // 5. Broadcast to Reth
@@ -1325,7 +1562,7 @@ async fn send_funding_tx(reth_port: u16, target: Address, value: U256) -> Result
     // Wait for the block mining
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-    Ok(())
+    Ok(tx_hash)
 }
 
 async fn fund_gas_if_needed(reth_port: u16, target: Address, gas_price: U256, gas_limit: u64) {
@@ -1381,6 +1618,46 @@ fn inject_history_into_block(reth_response: serde_json::Value, full_txs: bool) -
 
     let mut enriched = reth_response.clone();
     if let Some(txs) = enriched["result"]["transactions"].as_array_mut() {
+        for tx_val in txs.iter_mut() {
+            if let Some(hash_str) = tx_val.as_str() {
+                if let Ok(tx_hash) = hash_str.parse::<B256>() {
+                    let synthetic_opt = get_synthetic_tx_hashes().read().unwrap().get(&tx_hash).copied();
+                    if let Some(synth_hash) = synthetic_opt {
+                        *tx_val = json!(format!("{synth_hash:#x}"));
+                    }
+                }
+            } else if tx_val.is_object() {
+                if let Some(hash_str) = tx_val["hash"].as_str() {
+                    if let Ok(tx_hash) = hash_str.parse::<B256>() {
+                        let mut lookup_hash = tx_hash;
+                        let synthetic_opt = get_synthetic_tx_hashes().read().unwrap().get(&tx_hash).copied();
+                        if let Some(synth_hash) = synthetic_opt {
+                            tx_val["hash"] = json!(format!("{synth_hash:#x}"));
+                            lookup_hash = synth_hash;
+                        }
+
+                        let synthetic_meta_opt = get_synthetic_meta().read().unwrap().get(&lookup_hash).cloned();
+                        if let Some(meta) = synthetic_meta_opt {
+                            tx_val["from"] = json!(format!("{:#x}", meta.original_sender));
+                            tx_val["to"] = json!(format!("{:#x}", meta.receiver));
+                            tx_val["value"] = json!(format!("0x{:x}", meta.inbox_value));
+                            tx_val["gas"] = json!("0x5208");
+                            tx_val["gasPrice"] = json!("0x0");
+                        }
+
+                        let outbound_meta_opt = get_outbound_meta().read().unwrap().get(&lookup_hash).cloned();
+                        if let Some(meta) = outbound_meta_opt {
+                            tx_val["from"] = json!(format!("{:#x}", meta.sender));
+                            tx_val["to"] = json!(format!("{:#x}", meta.recipient));
+                            tx_val["value"] = json!(format!("0x{:x}", meta.amount));
+                            tx_val["gas"] = json!("0x5208");
+                            tx_val["gasPrice"] = json!(format!("0x{:x}", meta.gas_price));
+                        }
+                    }
+                }
+            }
+        }
+
         let state = get_state().read().unwrap();
         for records in state.native_history.values() {
             for rec in records {
@@ -1698,6 +1975,49 @@ async fn sync_hot_storage(reth_port: u16) {
                     }
                 }
 
+                let synthetic_opt = get_synthetic_tx_hashes().write().unwrap().remove(&tx_hash);
+                if let Some(synthetic_hash) = synthetic_opt {
+                    let b_hash = block_hash_opt.clone().and_then(|h| h.parse::<B256>().ok()).unwrap_or_default();
+                    if let Ok(mut meta_lock) = get_synthetic_meta().write() {
+                        if let Some(meta) = meta_lock.get_mut(&synthetic_hash) {
+                            meta.block_hash = b_hash;
+                            meta.block_number = num;
+                        }
+                    }
+
+                    let mut orig_sender = to_addr;
+                    if let Ok(meta_lock) = get_synthetic_meta().read() {
+                        if let Some(meta) = meta_lock.get(&synthetic_hash) {
+                            orig_sender = meta.original_sender;
+                        }
+                    }
+
+                    let mut reg = get_registry().write().unwrap();
+                    let mut state = get_state().write().unwrap();
+                    let record = NativeTransferRecord {
+                        tx_hash: synthetic_hash,
+                        block_hash: block_hash_opt.clone(),
+                        block_number: num_hex.clone(),
+                        from: orig_sender,
+                        from_did: reg.get_did_by_address(&orig_sender),
+                        to: to_addr,
+                        to_did: reg.get_did_by_address(&to_addr),
+                        value: value.to_string(),
+                        timestamp: now_secs(),
+                        v: "0x1c".to_string(),
+                        r: "0x0".to_string(),
+                        s: "0x0".to_string(),
+                    };
+                    add_native_transfer_record(&mut state, record);
+                }
+
+                if let Ok(mut meta_lock) = get_outbound_meta().write() {
+                    if let Some(meta) = meta_lock.get_mut(&tx_hash) {
+                        meta.virtual_block_hash = block_hash_opt.clone().and_then(|h| h.parse::<B256>().ok()).unwrap_or_default();
+                        meta.virtual_block_number = num;
+                    }
+                }
+
                 if value > U256::ZERO && from_addr != Address::ZERO && to_addr != Address::ZERO {
                     {
                         let mut reg = get_registry().write().unwrap();
@@ -1745,4 +2065,38 @@ fn timestamp_nanos() -> u128 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos()
+}
+
+async fn handle_get_transaction_count(reth_port: u16, account: Address) -> u64 {
+    let mut seq = 0;
+    if let Ok(reg) = get_registry().read() {
+        if let Some(frontier) = reg.account_frontiers.get(&account) {
+            seq = frontier.sequence;
+        }
+    }
+    if seq == 0 {
+        get_reth_transaction_count(reth_port, account).await
+    } else {
+        seq
+    }
+}
+
+async fn get_reth_transaction_count(reth_port: u16, addr: Address) -> u64 {
+    let client = reqwest::Client::new();
+    let res = client.post(format!("http://127.0.0.1:{reth_port}"))
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "eth_getTransactionCount",
+            "params": [format!("{addr:#x}"), "latest"],
+            "id": 1
+        }))
+        .send()
+        .await;
+    if let Ok(r) = res {
+        if let Ok(val) = r.json::<serde_json::Value>().await {
+            let count_hex = val["result"].as_str().unwrap_or("0x0");
+            return u64::from_str_radix(count_hex.trim_start_matches("0x"), 16).unwrap_or(0);
+        }
+    }
+    0
 }

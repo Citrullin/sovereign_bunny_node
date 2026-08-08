@@ -356,6 +356,16 @@ where
     ) -> TransactionValidationOutcome<Self::Transaction> {
         let registry_lock = crate::registry::get_registry();
 
+        // Enforce that zero-gas transactions are only allowed for pure self-sends
+        let is_pure_self_send = transaction.to() == Some(transaction.sender()) && transaction.input().is_empty();
+        let gas_price = transaction.gas_price().unwrap_or(0);
+        if gas_price == 0 && !is_pure_self_send {
+            return TransactionValidationOutcome::Invalid(
+                transaction,
+                InvalidTransactionError::TxTypeNotSupported.into(),
+            );
+        }
+
         // 1. Call standard inner transaction validator
         let inner_outcome = self.inner.validate_transaction(origin, transaction.clone()).await;
         
