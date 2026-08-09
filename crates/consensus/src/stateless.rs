@@ -607,10 +607,35 @@ pub fn execute_lattice_block(block: &LatticeBlock) -> Result<B256, &'static str>
         return Err("LatticeBlock sequence mismatch with account frontier");
     }
 
-    // 5. Verify signature (mock/placeholder verification using the DID)
-    let did = reg.get_did_by_address(&block.account);
-    if did.is_none() {
-        return Err("Account has no registered DID identity");
+    // 5. Verify signature using the DID's registered public key
+    let did = reg.get_did_by_address(&block.account)
+        .ok_or("Account has no registered DID identity")?;
+    
+    let is_mock = block.signature == vec![0x00];
+    if is_mock {
+        #[cfg(not(test))]
+        if std::env::var("SOVEREIGN_MOCK_SGX").is_err() {
+            return Err("Cryptographic signature required on lattice block");
+        }
+    } else {
+        let ident = reg.identities.get(&did)
+            .ok_or("Registered DID identity not found in registry")?;
+        
+        let payload_bytes = scale::Encode::encode(&block.payload);
+        let payload_hash = alloy_primitives::keccak256(&payload_bytes);
+
+        let mut sig_bytes = block.signature.clone();
+        if sig_bytes.len() == 65 {
+            sig_bytes.truncate(64);
+        }
+        let verifying_key = k256::ecdsa::VerifyingKey::from_sec1_bytes(&ident.doc.secp256k1_pubkey)
+            .map_err(|_| "Invalid Secp256k1 public key in DID document")?;
+        let sig = k256::ecdsa::Signature::from_slice(&sig_bytes)
+            .map_err(|_| "Invalid Secp256k1 signature format")?;
+        
+        use k256::ecdsa::signature::hazmat::PrehashVerifier as _;
+        verifying_key.verify_prehash(&payload_hash[..], &sig)
+            .map_err(|_| "LatticeBlock signature verification failed")?;
     }
 
     // 6. Handle payload types

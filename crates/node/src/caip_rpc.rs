@@ -54,6 +54,20 @@ pub struct MemoryState {
 
 static STATE: OnceLock<RwLock<MemoryState>> = OnceLock::new();
 
+static DAEMON: OnceLock<sovereign_consensus::archival::RpcIpfsArchivalDaemon> = OnceLock::new();
+
+fn get_archival_daemon() -> &'static sovereign_consensus::archival::RpcIpfsArchivalDaemon {
+    DAEMON.get_or_init(|| {
+        let is_mock = std::env::var("SOVEREIGN_MOCK_SGX").is_ok() || cfg!(debug_assertions);
+        let backend: std::sync::Arc<dyn sovereign_consensus::archival::ArchivalStorageBackend> = if is_mock {
+            std::sync::Arc::new(sovereign_consensus::archival::MockArchivalBackend::new())
+        } else {
+            std::sync::Arc::new(sovereign_consensus::archival::LocalIpfsClusterBackend::new("http://127.0.0.1:5001", false))
+        };
+        sovereign_consensus::archival::RpcIpfsArchivalDaemon::new(backend)
+    })
+}
+
 use std::sync::atomic::{AtomicU64, Ordering};
 /// Global static configured chain ID of the node.
 pub static CHAIN_ID: AtomicU64 = AtomicU64::new(1337);
@@ -456,7 +470,15 @@ pub async fn run_proxy(port: u16, reth_port: u16, chain_id: u64) -> Result<(), e
                         verkle_witness_proof: proof_bytes.clone(),
                     };
 
-                    let root = B256::repeat_byte(0xaa);
+                    let block_req = json!({ "jsonrpc": "2.0", "method": "eth_getBlockByNumber", "params": ["latest", false], "id": 9999 });
+                    let mut root = B256::repeat_byte(0xaa);
+                    if let Ok(res) = forward_to_reth_http(reth_port, &block_req).await {
+                        if let Some(r_str) = res["result"]["stateRoot"].as_str() {
+                            if let Ok(r) = r_str.parse::<B256>() {
+                                root = r;
+                            }
+                        }
+                    }
                     let verified = sovereign_consensus::stateless::verify_receive_stateless(&receive_header, root);
 
                     if !verified {
@@ -466,10 +488,14 @@ pub async fn run_proxy(port: u16, reth_port: u16, chain_id: u64) -> Result<(), e
 
                     {
                         let mut reg = get_registry().write().unwrap();
+                        let mut frontier = reg.get_or_create_frontier(recipient_addr);
+                        let next_seq = frontier.sequence + 1;
+                        let prev_hash = frontier.latest_hash;
+
                         let receive_block = sovereign_consensus::stateless::LatticeBlock {
                             account: recipient_addr,
-                            previous_hash: B256::ZERO,
-                            sequence: 1,
+                            previous_hash: prev_hash,
+                            sequence: next_seq,
                             payload: sovereign_consensus::stateless::LatticePayload::Receive {
                                 send_block_hash,
                                 amount: U256::from(0),
@@ -478,6 +504,10 @@ pub async fn run_proxy(port: u16, reth_port: u16, chain_id: u64) -> Result<(), e
                             static_witnesses: vec![],
                         };
                         let receive_block_hash = alloy_primitives::keccak256(&scale::Encode::encode(&receive_block));
+                        
+                        frontier.latest_hash = receive_block_hash;
+                        frontier.sequence = next_seq;
+                        reg.update_frontier(recipient_addr, frontier);
                         reg.lattice_blocks.insert(receive_block_hash, receive_block);
                     }
 
@@ -520,6 +550,34 @@ pub async fn run_proxy(port: u16, reth_port: u16, chain_id: u64) -> Result<(), e
                     let sender_addr = body_json["params"][0].as_str().unwrap_or("").parse::<Address>().unwrap_or_default();
                     let send_block_hash = body_json["params"][1].as_str().unwrap_or("").parse::<B256>().unwrap_or_default();
                     let current_block_num = body_json["params"].get(2).and_then(|v| v.as_u64()).unwrap_or(0);
+
+                    // verify reclaim signature
+                    let sig_hex = body_json["params"].get(3).and_then(|v| v.as_str()).unwrap_or("");
+                    let clean_sig = sig_hex.strip_prefix("0x").unwrap_or(sig_hex);
+                    let sig_bytes = alloy_primitives::hex::decode(clean_sig).unwrap_or_default();
+                    
+                    let mut verified_sig = false;
+                    if let Ok(reg) = get_registry().read() {
+                        if let Some(did) = reg.get_did_by_address(&sender_addr) {
+                            if let Some(ident) = reg.identities.get(&did) {
+                                let verifying_key = k256::ecdsa::VerifyingKey::from_sec1_bytes(&ident.doc.secp256k1_pubkey);
+                                let sig = k256::ecdsa::Signature::from_slice(&sig_bytes);
+                                let message = format!("reclaimSend:{send_block_hash:#x}:{current_block_num}");
+                                let digest = alloy_primitives::keccak256(message.as_bytes());
+                                if let (Ok(vk), Ok(s)) = (verifying_key, sig) {
+                                    use k256::ecdsa::signature::hazmat::PrehashVerifier as _;
+                                    if vk.verify_prehash(&digest[..], &s).is_ok() {
+                                        verified_sig = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if !verified_sig {
+                        send_error(&mut client_stream, &id, -32003, "Reclaim failed: Invalid sender signature").await;
+                        continue;
+                    }
 
                     let mut is_claimed = false;
                     if let Ok(reg) = get_registry().read() {
@@ -617,17 +675,6 @@ pub async fn run_proxy(port: u16, reth_port: u16, chain_id: u64) -> Result<(), e
                     continue;
                 }
 
-                if method == "sovereign_registerDidKeys" {
-                    let did_uri = body_json["params"][0].as_str().unwrap_or("");
-                    {
-                        let mut reg = get_registry().write().unwrap();
-                        reg.register_user_did(did_uri.to_string()).ok();
-                    }
-
-                    send_result(&mut client_stream, &id, json!({ "status": "success", "message": "DID keys registered on-chain" })).await;
-                    continue;
-                }
-
                 if let Some(result) = handle_wallet_method(method, &body_json) {
                     send_result(&mut client_stream, &id, result).await;
                     continue;
@@ -655,7 +702,10 @@ pub async fn run_proxy(port: u16, reth_port: u16, chain_id: u64) -> Result<(), e
                         reg.is_did_fully_registered(did)
                     } else {
                         decode_sender(raw_tx).map(|sender_addr| {
-                            if sender_addr == "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266".parse::<Address>().unwrap() {
+                            let is_dev = cfg!(debug_assertions) 
+                                || std::env::var("SOVEREIGN_MOCK_SGX").is_ok()
+                                || std::env::args().any(|arg| arg == "--dev");
+                            if is_dev && sender_addr == "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266".parse::<Address>().unwrap() {
                                 true
                             } else {
                                 let reg = get_registry().read().unwrap();
@@ -762,31 +812,36 @@ pub async fn run_proxy(port: u16, reth_port: u16, chain_id: u64) -> Result<(), e
                                      block_number: 0,
                                  };
                                  get_synthetic_meta().write().unwrap().insert(synthetic_hash, meta);
-                                {
-                                    let mut reg = get_registry().write().unwrap();
-                                    if let Some(frontier) = reg.account_frontiers.get_mut(&sender) {
-                                        frontier.sequence += 1;
-                                    }
-                                    for send_hash in &unclaimed_hashes {
-                                        let receive_block = sovereign_consensus::stateless::LatticeBlock {
-                                            account: sender,
-                                            previous_hash: B256::ZERO,
-                                            sequence: 1,
-                                            payload: sovereign_consensus::stateless::LatticePayload::Receive {
-                                                send_block_hash: *send_hash,
-                                                amount: U256::from(0),
-                                            },
-                                            signature: vec![],
-                                            static_witnesses: vec![],
-                                        };
-                                        let block_hash = B256::random();
-                                        reg.lattice_blocks.insert(block_hash, receive_block);
-                                    }
-                                }
+                                 {
+                                     let mut reg = get_registry().write().unwrap();
+                                     for send_hash in &unclaimed_hashes {
+                                         let mut frontier = reg.get_or_create_frontier(sender);
+                                         let next_seq = frontier.sequence + 1;
+                                         let prev_hash = frontier.latest_hash;
 
-                                insert_synthetic_receipt(synthetic_hash, sender);
-                                send_result(&mut client_stream, &id, json!(format!("{synthetic_hash:#x}"))).await;
-                                continue;
+                                         let receive_block = sovereign_consensus::stateless::LatticeBlock {
+                                             account: sender,
+                                             previous_hash: prev_hash,
+                                             sequence: next_seq,
+                                             payload: sovereign_consensus::stateless::LatticePayload::Receive {
+                                                 send_block_hash: *send_hash,
+                                                 amount: U256::from(0),
+                                             },
+                                             signature: vec![],
+                                             static_witnesses: vec![],
+                                         };
+                                         let receive_block_hash = alloy_primitives::keccak256(&scale::Encode::encode(&receive_block));
+                                         
+                                         frontier.latest_hash = receive_block_hash;
+                                         frontier.sequence = next_seq;
+                                         reg.update_frontier(sender, frontier);
+                                         reg.lattice_blocks.insert(receive_block_hash, receive_block);
+                                     }
+                                 }
+
+                                 insert_synthetic_receipt(synthetic_hash, sender);
+                                 send_result(&mut client_stream, &id, json!(format!("{synthetic_hash:#x}"))).await;
+                                 continue;
                             }
 
                             if inbox_value > 0 {
@@ -797,10 +852,14 @@ pub async fn run_proxy(port: u16, reth_port: u16, chain_id: u64) -> Result<(), e
                                 {
                                     let mut reg = get_registry().write().unwrap();
                                     for send_hash in &unclaimed_hashes {
+                                        let mut frontier = reg.get_or_create_frontier(sender);
+                                        let next_seq = frontier.sequence + 1;
+                                        let prev_hash = frontier.latest_hash;
+
                                         let receive_block = sovereign_consensus::stateless::LatticeBlock {
                                             account: sender,
-                                            previous_hash: B256::ZERO,
-                                            sequence: 1,
+                                            previous_hash: prev_hash,
+                                            sequence: next_seq,
                                             payload: sovereign_consensus::stateless::LatticePayload::Receive {
                                                 send_block_hash: *send_hash,
                                                 amount: U256::from(0),
@@ -808,8 +867,12 @@ pub async fn run_proxy(port: u16, reth_port: u16, chain_id: u64) -> Result<(), e
                                             signature: vec![],
                                             static_witnesses: vec![],
                                         };
-                                        let block_hash = B256::random();
-                                        reg.lattice_blocks.insert(block_hash, receive_block);
+                                        let receive_block_hash = alloy_primitives::keccak256(&scale::Encode::encode(&receive_block));
+                                        
+                                        frontier.latest_hash = receive_block_hash;
+                                        frontier.sequence = next_seq;
+                                        reg.update_frontier(sender, frontier);
+                                        reg.lattice_blocks.insert(receive_block_hash, receive_block);
                                     }
                                 }
                             }
@@ -848,14 +911,15 @@ pub async fn run_proxy(port: u16, reth_port: u16, chain_id: u64) -> Result<(), e
                                  get_synthetic_meta().write().unwrap().insert(synthetic_hash, meta);
                                 {
                                     let mut reg = get_registry().write().unwrap();
-                                    if let Some(frontier) = reg.account_frontiers.get_mut(&sender) {
-                                        frontier.sequence += 1;
-                                    }
                                     for send_hash in &unclaimed_hashes {
+                                        let mut frontier = reg.get_or_create_frontier(sender);
+                                        let next_seq = frontier.sequence + 1;
+                                        let prev_hash = frontier.latest_hash;
+
                                         let receive_block = sovereign_consensus::stateless::LatticeBlock {
                                             account: sender,
-                                            previous_hash: B256::ZERO,
-                                            sequence: 1,
+                                            previous_hash: prev_hash,
+                                            sequence: next_seq,
                                             payload: sovereign_consensus::stateless::LatticePayload::Receive {
                                                 send_block_hash: *send_hash,
                                                 amount: U256::from(0),
@@ -863,8 +927,12 @@ pub async fn run_proxy(port: u16, reth_port: u16, chain_id: u64) -> Result<(), e
                                             signature: vec![],
                                             static_witnesses: vec![],
                                         };
-                                        let block_hash = B256::random();
-                                        reg.lattice_blocks.insert(block_hash, receive_block);
+                                        let receive_block_hash = alloy_primitives::keccak256(&scale::Encode::encode(&receive_block));
+                                        
+                                        frontier.latest_hash = receive_block_hash;
+                                        frontier.sequence = next_seq;
+                                        reg.update_frontier(sender, frontier);
+                                        reg.lattice_blocks.insert(receive_block_hash, receive_block);
                                     }
                                 }
 
@@ -1192,7 +1260,7 @@ fn handle_wallet_method(method: &str, body_json: &serde_json::Value) -> Option<s
                 if found_tx.is_some() { break; }
             }
             
-            if intent_id == "intent_tx_9999" {
+            if cfg!(debug_assertions) && intent_id == "intent_tx_9999" {
                 Some(json!({
                     "intentId": intent_id,
                     "status": "completed",
@@ -1320,23 +1388,34 @@ fn handle_wallet_method(method: &str, body_json: &serde_json::Value) -> Option<s
         },
         "sovereign_getStatelessWitness" => {
             let cid = body_json["params"][0].as_str().unwrap_or("");
-            let backend = std::sync::Arc::new(sovereign_consensus::archival::MockArchivalBackend::new());
-            let daemon = sovereign_consensus::archival::RpcIpfsArchivalDaemon::new(backend);
-            let witness = sovereign_consensus::stateless::AccountWitness {
-                balance: alloy_primitives::U256::from(7_500_000u64),
-                nonce: 42,
-                code_hash: B256::repeat_byte(0xba),
-                code: b"somerevmbytecode".to_vec(),
-                quadrant_matrix: [0b11, 0b1000, 0, 0b10],
-            };
-            let _ = daemon.archive_account_witness(65001, &witness);
-            let resolved = daemon.resolve_account_witness(cid).unwrap_or(witness);
-            Some(json!({
-                "balance": format!("{:?}", resolved.balance),
-                "nonce": resolved.nonce,
-                "codeHash": format!("{:?}", resolved.code_hash),
-                "quadrantMatrix": resolved.quadrant_matrix
-            }))
+            let daemon = get_archival_daemon();
+            // Pre-seed mock data if needed for testing/mocking
+            if std::env::var("SOVEREIGN_MOCK_SGX").is_ok() || cfg!(debug_assertions) {
+                let witness = sovereign_consensus::stateless::AccountWitness {
+                    balance: alloy_primitives::U256::from(7_500_000u64),
+                    nonce: 42,
+                    code_hash: B256::repeat_byte(0xba),
+                    code: b"somerevmbytecode".to_vec(),
+                    quadrant_matrix: [0b11, 0b1000, 0, 0b10],
+                };
+                let _ = daemon.archive_account_witness(65001, &witness);
+            }
+            let resolved = daemon.resolve_account_witness(cid).ok();
+            if let Some(r) = resolved {
+                Some(json!({
+                    "balance": format!("{:?}", r.balance),
+                    "nonce": r.nonce,
+                    "codeHash": format!("{:?}", r.code_hash),
+                    "quadrantMatrix": r.quadrant_matrix
+                }))
+            } else {
+                Some(json!({
+                    "error": {
+                        "code": -32004,
+                        "message": "Stateless witness not found for CID"
+                    }
+                }))
+            }
         },
         "sovereign_sendBlock" => {
             let block_val = &body_json["params"][0];
@@ -1519,8 +1598,15 @@ async fn send_funding_tx(reth_port: u16, target: Address, value: U256) -> Result
     tracing::info!("Queried dev account funding nonce: {} (raw: {})", nonce, nonce_str);
 
     // 2. Build Legacy Tx
-    let dev_key = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
-    let signer = dev_key.parse::<PrivateKeySigner>()?;
+    // SOVEREIGN_FUNDER_KEY must be set in production. Falls back to Hardhat dev key only in debug/mock/dev mode.
+    let funder_key = if let Ok(k) = std::env::var("SOVEREIGN_FUNDER_KEY") {
+        k
+    } else if cfg!(debug_assertions) || std::env::var("SOVEREIGN_MOCK_SGX").is_ok() || std::env::args().any(|arg| arg == "--dev") {
+        "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80".to_string()
+    } else {
+        return Err(eyre::eyre!("SOVEREIGN_FUNDER_KEY env var is required in production mode"));
+    };
+    let signer = funder_key.parse::<PrivateKeySigner>()?;
     let chain_id = CHAIN_ID.load(std::sync::atomic::Ordering::Relaxed);
     let mut tx = TxLegacy {
         chain_id: Some(chain_id),
@@ -1872,11 +1958,12 @@ fn index_from_raw_tx(raw_tx: &str, tx_hash: B256, sender: Address) {
 }
 
 fn extract_header<'a>(request_str: &'a str, name: &str) -> Option<&'a str> {
+    // Strict matching: header must be exactly "<name>: <value>" (RFC 7230 format)
+    let prefix = format!("{}: ", name.to_lowercase());
     for line in request_str.lines() {
-        if line.to_lowercase().starts_with(name) {
-            if let Some(val) = line.splitn(2, ':').nth(1) {
-                return Some(val.trim());
-            }
+        let lower = line.to_lowercase();
+        if lower.starts_with(&prefix) {
+            return Some(line[prefix.len()..].trim());
         }
     }
     None

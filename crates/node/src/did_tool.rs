@@ -375,15 +375,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Commands::Reclaim { seed, seedphrase, send_hash } => {
                 let seed_bytes = get_seed_bytes(seed, seedphrase)?;
-                let (_, address) = derive_secp_key(&seed_bytes)?;
+                let (signer, address) = derive_secp_key(&seed_bytes)?;
 
                 println!("📡 Submitting sovereign_reclaimSend via RPC for {}...", send_hash);
                 // Query current block number to pass for verification (or default to 15, which triggers 10 blocks timeout)
                 let current_block_num = 15;
+                
+                let message = format!("reclaimSend:{send_hash}:{current_block_num}");
+                let digest = alloy_primitives::keccak256(message.as_bytes());
+                use k256::ecdsa::signature::hazmat::PrehashSigner as _;
+                let sig: k256::ecdsa::Signature = signer.sign_prehash(&digest[..])?;
+                let sig_hex = format!("0x{}", hex::encode(sig.to_bytes()));
+
                 let reclaim_rpc = json!({
                     "jsonrpc": "2.0",
                     "method": "sovereign_reclaimSend",
-                    "params": [format!("{:#x}", address), send_hash, current_block_num],
+                    "params": [format!("{:#x}", address), send_hash, current_block_num, sig_hex],
                     "id": 1
                 });
                 let res = client.post(&args.rpc_url).json(&reclaim_rpc).send().await?;
