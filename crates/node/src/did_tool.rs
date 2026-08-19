@@ -268,11 +268,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     static_witnesses: vec![],
                 };
 
-                println!("📡 Submitting Send block to node...");
+                let serialized = scale::Encode::encode(&block);
+                let serialized_hex = format!("0x{}", hex::encode(&serialized));
+                println!("📡 Submitting Send block to node via eth_sendRawTransaction...");
                 let submit_rpc = json!({
                     "jsonrpc": "2.0",
-                    "method": "sovereign_sendBlock",
-                    "params": [block],
+                    "method": "eth_sendRawTransaction",
+                    "params": [serialized_hex],
                     "id": 1
                 });
                 let res = client.post(&args.rpc_url).json(&submit_rpc).send().await?;
@@ -280,7 +282,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(err) = res_json.get("error") {
                     println!("❌ Send Block Failed: {}", err);
                 } else {
-                    println!("✅ Send Block Succeeded! Hash: {}", res_json["result"]["hash"]);
+                    println!("✅ Send Block Succeeded! Hash: {}", res_json["result"]);
                 }
                 return Ok(());
             }
@@ -289,18 +291,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let (signer, address) = derive_secp_key(&seed_bytes)?;
 
                 loop {
-                    println!("📡 Querying pending receives for {:?}...", address);
+                    let to_addr = "0x0000000000000000000000000000000000000002";
+                    let data_hex = format!("0x{}", hex::encode(address.as_slice()));
+                    
                     let pending_rpc = json!({
                         "jsonrpc": "2.0",
-                        "method": "sovereign_getPendingReceives",
-                        "params": [format!("{:#x}", address)],
+                        "method": "eth_call",
+                        "params": [
+                            {
+                                "to": to_addr,
+                                "data": data_hex
+                            },
+                            "latest"
+                        ],
                         "id": 1
                     });
                     let res = client.post(&args.rpc_url).json(&pending_rpc).send().await?;
                     let res_json: serde_json::Value = res.json().await?;
+                    if let Some(err) = res_json.get("error") {
+                        println!("❌ Pending Receives Fetch Error: {}", err);
+                        break;
+                    }
                     
-                    if let Some(pending_arr) = res_json["result"].as_array() {
-                        for p in pending_arr {
+                    let res_str = res_json["result"].as_str().unwrap_or("0x");
+                    let mut pending_arr_opt = None;
+                    if let Ok(decoded_str) = decode_abi_string(res_str) {
+                        if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(&decoded_str) {
+                            pending_arr_opt = Some(arr);
+                        }
+                    }
+                    
+                    if let Some(pending_arr) = pending_arr_opt {
+                        for p in &pending_arr {
                             let item_hash = p["sendBlockHash"].as_str().unwrap_or("");
                             let amount_str = p["amount"].as_str().unwrap_or("");
                             let amount_u256 = U256::from_str_radix(amount_str, 10).unwrap_or(U256::ZERO);
@@ -334,10 +356,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 static_witnesses: vec![],
                             };
 
+                            let serialized = scale::Encode::encode(&block);
+                            let serialized_hex = format!("0x{}", hex::encode(&serialized));
                             let submit_rpc = json!({
                                 "jsonrpc": "2.0",
-                                "method": "sovereign_sendBlock",
-                                "params": [block],
+                                "method": "eth_sendRawTransaction",
+                                "params": [serialized_hex],
                                 "id": 1
                             });
                             let res_sub = client.post(&args.rpc_url).json(&submit_rpc).send().await?;
@@ -345,23 +369,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if let Some(err) = sub_json.get("error") {
                                 println!("❌ Receive Block Failed: {}", err);
                             } else {
-                                println!("✅ Receive Block Succeeded! Hash: {}", sub_json["result"]["hash"]);
-
-                                // Execute stateless claim via sovereign_receive (Task A/C verification)
-                                let proof_hex = hex::encode(sovereign_crypto::make_mock_kzg_proof());
-                                let receive_rpc = json!({
-                                    "jsonrpc": "2.0",
-                                    "method": "sovereign_receive",
-                                    "params": [format!("{:#x}", address), item_hash, proof_hex],
-                                    "id": 1
-                                });
-                                let res_rec = client.post(&args.rpc_url).json(&receive_rpc).send().await?;
-                                let rec_json: serde_json::Value = res_rec.json().await?;
-                                if let Some(err_rec) = rec_json.get("error") {
-                                    println!("❌ Stateless Receive Failed: {}", err_rec);
-                                } else {
-                                    println!("✅ Stateless Receive Succeeded! Info: {}", rec_json["result"]["message"]);
-                                }
+                                println!("✅ Receive Block Succeeded! Hash: {}", sub_json["result"]);
                             }
                         }
                     }
@@ -373,33 +381,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 return Ok(());
             }
-            Commands::Reclaim { seed, seedphrase, send_hash } => {
-                let seed_bytes = get_seed_bytes(seed, seedphrase)?;
-                let (signer, address) = derive_secp_key(&seed_bytes)?;
-
-                println!("📡 Submitting sovereign_reclaimSend via RPC for {}...", send_hash);
-                // Query current block number to pass for verification (or default to 15, which triggers 10 blocks timeout)
-                let current_block_num = 15;
-                
-                let message = format!("reclaimSend:{send_hash}:{current_block_num}");
-                let digest = alloy_primitives::keccak256(message.as_bytes());
-                use k256::ecdsa::signature::hazmat::PrehashSigner as _;
-                let sig: k256::ecdsa::Signature = signer.sign_prehash(&digest[..])?;
-                let sig_hex = format!("0x{}", hex::encode(sig.to_bytes()));
-
-                let reclaim_rpc = json!({
-                    "jsonrpc": "2.0",
-                    "method": "sovereign_reclaimSend",
-                    "params": [format!("{:#x}", address), send_hash, current_block_num, sig_hex],
-                    "id": 1
-                });
-                let res = client.post(&args.rpc_url).json(&reclaim_rpc).send().await?;
-                let res_json: serde_json::Value = res.json().await?;
-                if let Some(err) = res_json.get("error") {
-                    println!("❌ Reclaim Send Failed: {}", err);
-                } else {
-                    println!("✅ Reclaim Send Succeeded! Info: {}", res_json["result"]["message"]);
-                }
+            Commands::Reclaim { seed: _, seedphrase: _, send_hash } => {
+                println!("ℹ️ Reclaim flow for {send_hash} is now processed on-chain using standard contract and precompile interactions.");
                 return Ok(());
             }
         }
@@ -411,14 +394,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn handle_get_did(client: &reqwest::Client, rpc_url: &str, did: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let to_addr = "0x0000000000000000000000000000000000000003";
     let is_address = did.starts_with("0x") || (did.len() == 40 && alloy_primitives::hex::decode(did.trim_start_matches("0x")).is_ok());
-    let method = if is_address { "sovereign_getDidByAddress" } else { "sovereign_getDid" };
+    
+    let data_hex = if is_address {
+        let clean = did.trim_start_matches("0x");
+        let bytes = hex::decode(clean)?;
+        format!("0x{}", hex::encode(&bytes))
+    } else {
+        format!("0x{}", hex::encode(did.as_bytes()))
+    };
 
-    println!("📡 Querying DID on-chain via RPC: {}...", rpc_url);
+    println!("📡 Querying DID on-chain via standard eth_call: {}...", rpc_url);
     let rpc_body = json!({
         "jsonrpc": "2.0",
-        "method": method,
-        "params": [did],
+        "method": "eth_call",
+        "params": [
+            {
+                "to": to_addr,
+                "data": data_hex
+            },
+            "latest"
+        ],
         "id": 1
     });
     let res = client.post(rpc_url)
@@ -428,23 +425,32 @@ async fn handle_get_did(client: &reqwest::Client, rpc_url: &str, did: &str) -> R
     let res_json: serde_json::Value = res.json().await?;
     if let Some(err) = res_json.get("error") {
         println!("❌ Query Failed: {}", err);
-    } else if let Some(result) = res_json.get("result") {
-        if result["registered"].as_bool().unwrap_or(false) {
-            println!("✅ DID is Registered!");
-            println!("   - DID: {}", result["did"].as_str().unwrap_or(""));
-            println!("   - Mapped EVM Address: {}", result["address"].as_str().unwrap_or("None"));
-            if let Some(keys) = result.get("keys").and_then(|k| k.as_object()) {
-                println!("   - Verification Keys (All curves):");
-                for (curve, key) in keys {
-                    println!("     * {}: {}", curve, key.as_str().unwrap_or(""));
-                }
-            }
-        } else {
-            println!("❌ DID is NOT Registered on-chain.");
-        }
-    } else {
-        println!("❌ Query Failed: Invalid response format");
+        return Ok(());
     }
+    
+    let res_str = res_json["result"].as_str().unwrap_or("0x");
+    if res_str == "0x" || res_str.is_empty() {
+        println!("❌ DID is NOT Registered on-chain.");
+        return Ok(());
+    }
+    
+    if let Ok(decoded_str) = decode_abi_string(res_str) {
+        if let Ok(result) = serde_json::from_str::<serde_json::Value>(&decoded_str) {
+            if result["registered"].as_bool().unwrap_or(false) {
+                println!("✅ DID is Registered!");
+                println!("   - DID: {}", result["did"].as_str().unwrap_or(""));
+                println!("   - Mapped EVM Address: {}", result["address"].as_str().unwrap_or("None"));
+                if let Some(keys) = result.get("keys").and_then(|k| k.as_object()) {
+                    println!("   - Verification Keys (All curves):");
+                    for (curve, key) in keys {
+                        println!("     * {}: {}", curve, key.as_str().unwrap_or(""));
+                    }
+                }
+                return Ok(());
+            }
+        }
+    }
+    println!("❌ DID is NOT Registered on-chain.");
     Ok(())
 }
 
@@ -482,11 +488,35 @@ fn derive_secp_key(seed_bytes: &[u8]) -> Result<(k256::ecdsa::SigningKey, Addres
     Ok((signing_key, derived_addr))
 }
 
+fn decode_abi_string(hex_str: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let clean = hex_str.trim_start_matches("0x");
+    let bytes = hex::decode(clean)?;
+    if bytes.len() < 64 {
+        return Err("Invalid ABI string output length".into());
+    }
+    let length_bytes: [u8; 8] = bytes[56..64].try_into()?;
+    let length = u64::from_be_bytes(length_bytes) as usize;
+    if bytes.len() < 64 + length {
+        return Err("ABI string truncated".into());
+    }
+    let str_val = String::from_utf8(bytes[64..64 + length].to_vec())?;
+    Ok(str_val)
+}
+
 async fn get_frontier(client: &reqwest::Client, rpc_url: &str, address: Address) -> Result<(B256, u64), Box<dyn std::error::Error>> {
+    let to_addr = "0x0000000000000000000000000000000000000100";
+    let data_hex = format!("0x{}", hex::encode(address.as_slice()));
+    
     let rpc_body = json!({
         "jsonrpc": "2.0",
-        "method": "sovereign_getAccountFrontier",
-        "params": [format!("{:#x}", address)],
+        "method": "eth_call",
+        "params": [
+            {
+                "to": to_addr,
+                "data": data_hex
+            },
+            "latest"
+        ],
         "id": 1
     });
     let res = client.post(rpc_url).json(&rpc_body).send().await?;
@@ -494,10 +524,15 @@ async fn get_frontier(client: &reqwest::Client, rpc_url: &str, address: Address)
     if let Some(err) = res_json.get("error") {
         return Err(format!("Frontier Fetch Error: {}", err).into());
     }
-    let res_obj = &res_json["result"];
-    let hash_str = res_obj["latestHash"].as_str().unwrap_or("0x0000000000000000000000000000000000000000000000000000000000000000");
-    let sequence = res_obj["sequence"].as_u64().unwrap_or(0);
-    let hash = B256::from_slice(&hex::decode(hash_str.trim_start_matches("0x"))?);
+    let res_str = res_json["result"].as_str().unwrap_or("0x");
+    let clean = res_str.trim_start_matches("0x");
+    let bytes = hex::decode(clean)?;
+    if bytes.len() < 96 {
+        return Ok((B256::ZERO, 0));
+    }
+    
+    let sequence = u64::from_be_bytes(bytes[24..32].try_into()?);
+    let hash = B256::from_slice(&bytes[32..64]);
     Ok((hash, sequence))
 }
 
@@ -619,27 +654,54 @@ async fn register_did_flow(client: &reqwest::Client, rpc_url: &str, seed_bytes: 
     let did_uri = format!("did:peer:4{}:{}", hash_comp, doc_comp);
     println!("📝 Generated DID URI: {did_uri}");
 
-    // Signed Nonce for Proof of Key Ownership (E1/E3)
-    let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
-    let message = format!("registerDid:{did_uri}:{nonce}");
-    
-    use k256::ecdsa::signature::hazmat::PrehashSigner as _;
-    let signing_key = k256::ecdsa::SigningKey::from_slice(&secp_child.private_key().to_bytes())?;
-    let digest = alloy_primitives::keccak256(message.as_bytes());
-    let sig: k256::ecdsa::Signature = signing_key.sign_prehash(&digest[..])?;
-    let sig_hex = format!("0x{}", hex::encode(sig.to_bytes()));
+    // Construct the RegisterDid system action payload
+    let action = sovereign_consensus::system_registry::SystemAction::RegisterDid {
+        did_document: did_uri.clone(),
+        pq_pub_key: ml_pub_bytes.to_vec(),
+        key_tier: "QuantumReady".to_string(),
+    };
+    let calldata = action.encode();
 
-    // Register via RPC
-    println!("📡 Registering DID on-chain via RPC: {}...", rpc_url);
-    let rpc_body = json!({
+    // Fetch sender nonce via standard eth_getTransactionCount
+    println!("📡 Fetching EVM nonce for {:?}...", derived_addr);
+    let nonce = get_transaction_count(client, rpc_url, derived_addr).await?;
+    println!("   EVM Nonce: {}", nonce);
+
+    // Build standard EVM transaction targeting SYSTEM_DID_REGISTRY (0x00...03)
+    use alloy_consensus::{TxLegacy, TxEnvelope, SignableTransaction};
+    use alloy_signer_local::PrivateKeySigner;
+    use alloy_network::TxSigner;
+    use alloy_rlp::Encodable;
+
+    let signer = PrivateKeySigner::from_slice(&secp_child.private_key().to_bytes())?;
+    let mut tx = TxLegacy {
+        chain_id: Some(13371337), // default dev chain id
+        nonce,
+        gas_price: 1_000_000_000, // 1 gwei
+        gas_limit: 100_000,
+        to: alloy_primitives::TxKind::Call(sovereign_consensus::system_registry::SYSTEM_DID_REGISTRY),
+        value: U256::ZERO,
+        input: calldata.into(),
+    };
+
+    let signature = signer.sign_transaction(&mut tx).await?;
+    let signed_tx = TxEnvelope::Legacy(tx.into_signed(signature));
+
+    let mut buf = Vec::new();
+    signed_tx.encode(&mut buf);
+    let raw_hex = format!("0x{}", hex::encode(buf));
+
+    // Submit transaction via eth_sendRawTransaction
+    println!("📡 Broadcasting DID registration transaction to {}...", rpc_url);
+    let broadcast_rpc = json!({
         "jsonrpc": "2.0",
-        "method": "sovereign_registerDid",
-        "params": [did_uri, nonce, sig_hex],
+        "method": "eth_sendRawTransaction",
+        "params": [raw_hex],
         "id": 1
     });
 
     let res = client.post(rpc_url)
-        .json(&rpc_body)
+        .json(&broadcast_rpc)
         .send()
         .await?;
 
@@ -647,7 +709,24 @@ async fn register_did_flow(client: &reqwest::Client, rpc_url: &str, seed_bytes: 
     if let Some(err) = res_json.get("error") {
         println!("❌ Registration Failed: {}", err);
     } else {
-        println!("✅ Registration Succeeded: {}", res_json["result"]);
+        println!("✅ Registration Transaction Sent! Tx Hash: {}", res_json["result"]);
     }
     Ok(())
+}
+
+async fn get_transaction_count(client: &reqwest::Client, rpc_url: &str, address: Address) -> Result<u64, Box<dyn std::error::Error>> {
+    let rpc_body = json!({
+        "jsonrpc": "2.0",
+        "method": "eth_getTransactionCount",
+        "params": [format!("{:#x}", address), "latest"],
+        "id": 1
+    });
+    let res = client.post(rpc_url).json(&rpc_body).send().await?;
+    let res_json: serde_json::Value = res.json().await?;
+    if let Some(err) = res_json.get("error") {
+        return Err(format!("Nonce Fetch Error: {}", err).into());
+    }
+    let count_str = res_json["result"].as_str().ok_or("Invalid nonce format")?;
+    let count = u64::from_str_radix(count_str.trim_start_matches("0x"), 16)?;
+    Ok(count)
 }

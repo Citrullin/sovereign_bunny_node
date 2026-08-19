@@ -248,9 +248,13 @@ pub fn verify_signature(
                 .map_err(|_| "Secp256k1 signature verification failed")?;
         }
         SignatureScheme::Secp256r1 => {
-            if public_key.len() != 33 && public_key.len() != 65 {
-                return Err("Invalid Secp256r1 public key length");
-            }
+            use p256::ecdsa::signature::Verifier;
+            let verifying_key = p256::ecdsa::VerifyingKey::from_sec1_bytes(public_key)
+                .map_err(|_| "Invalid Secp256r1 public key")?;
+            let sig = p256::ecdsa::Signature::from_slice(signature)
+                .map_err(|_| "Invalid Secp256r1 signature")?;
+            verifying_key.verify(message, &sig)
+                .map_err(|_| "Secp256r1 signature verification failed")?;
         }
         SignatureScheme::Pasta | SignatureScheme::BabyJubjub => {
             if public_key.len() != 32 || signature.len() != 64 {

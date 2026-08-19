@@ -147,14 +147,13 @@ async function runTests() {
 
   USER_DID = generatePeer4Did(MASTER_SEED, true);
 
-  // Pre-onboard: Register the user DID
-  console.log('📝 Registering user DID on-chain (sovereign_registerDid)...');
-  const nonce = Date.now();
-  const signature = signRegistration(USER_DID, nonce, MASTER_SEED);
-  const resReg = await rpcCall('sovereign_registerDid', [USER_DID, nonce, signature]);
-  console.log('DEBUG resReg:', JSON.stringify(resReg));
-  assert.ok(resReg.result);
-  assert.strictEqual(resReg.result.status, 'success');
+  // Pre-onboard: Register the user DID via standard transaction targeting SYSTEM_DID_REGISTRY using did-tool
+  console.log('📝 Registering user DID on-chain via did-tool...');
+  const didToolPath = getDidToolPath();
+  const registerCmd = `"${didToolPath}" register set --seed ${MASTER_SEED} --rpc-url ${RPC_URL}`;
+  const regOutput = execSync(registerCmd).toString().trim();
+  console.log(`  did-tool register output: ${regOutput}`);
+  assert.ok(regOutput.includes('Broadcast Succeeded!'), "DID registration must succeed");
   console.log(`✅ Onboarded user DID: ${USER_DID}`);
 
   // Test 1: CAIP-25 Session Initiation
@@ -262,7 +261,7 @@ async function runTests() {
 
   // Sign a real transaction dynamically via did-tool
   console.log('  ✍️ Signing legacy transaction using did-tool...');
-  const didToolPath = getDidToolPath();
+  didToolPath = getDidToolPath();
   const valueToSend = 1000000000000000000n; // 1 ETH in wei
   const gasLimit = 21000;
   const gasPrice = 1000000000; // 1 gwei

@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sovereign Wallet FAQ & Browser Reference</title>
+    <style>
+        :root {
+            --bg-color: #0d0f12;
+            --card-bg: #161a22;
+            --text-color: #e6edf3;
+            --text-muted: #8b949e;
+            --primary-color: #58a6ff;
+            --accent-color: #ff7b72;
+            --border-color: #30363d;
+            --success-color: #3fb950;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            line-height: 1.6;
+            margin: 0;
+            padding: 40px 20px;
+        }
+
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+        }
+
+        header {
+            text-align: center;
+            margin-bottom: 50px;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 20px;
+        }
+
+        h1 {
+            font-size: 2.5rem;
+            color: var(--primary-color);
+            margin-bottom: 10px;
+        }
+
+        h2 {
+            font-size: 1.8rem;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 8px;
+            margin-top: 40px;
+            color: var(--primary-color);
+        }
+
+        h3 {
+            font-size: 1.3rem;
+            color: var(--text-color);
+            margin-top: 30px;
+        }
+
+        .card {
+            background-color: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 24px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+        }
+
+        .warning-box {
+            background-color: rgba(248, 129, 109, 0.15);
+            border: 1px solid var(--accent-color);
+            border-radius: 8px;
+            padding: 16px;
+            margin: 20px 0;
+        }
+
+        code {
+            font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, Liberation Mono, monospace;
+            background-color: rgba(110, 118, 129, 0.2);
+            padding: 2px 6px;
+            border-radius: 6px;
+            font-size: 85%;
+        }
+
+        pre {
+            font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, Liberation Mono, monospace;
+            background-color: rgba(110, 118, 129, 0.2);
+            padding: 16px;
+            border-radius: 8px;
+            overflow-x: auto;
+        }
+
+        a {
+            color: var(--primary-color);
+            text-decoration: none;
+        }
+
+        a:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <header>
+            <h1>Sovereign Wallet FAQ</h1>
+            <p>Local-First Architecture, Browser Limits, and Post-Quantum Security Reference</p>
+        </header>
+
+        <section>
+            <h2>1. Browser Compatibility & Workarounds</h2>
+
+            <div class="warning-box">
+                <strong>⚠️ WARNING:</strong> Only Chromium-based browsers (Chrome, Brave, Edge, Opera) support full
+                native Filesystem APIs. You will experience inconveniences in other browsers.
+            </div>
+
+            <div class="card">
+                <h3>Why does the app warn me about my browser?</h3>
+                <p>
+                    This app uses the W3C File System Access API to store your DID document, private keys, intent
+                    escrows, and NFT assets directly in a local directory on your disk (e.g. <code>data/[DID]/</code>).
+                    Only Chromium-based browsers support opening and editing local folders natively.
+                </p>
+            </div>
+
+            <div class="card">
+                <h3>Firefox & Safari Workaround Guide</h3>
+                <p>
+                    If you use Firefox or Safari, you cannot select a persistent directory. Instead, follow these steps:
+                </p>
+                <ol>
+                    <li>When prompted, use the <strong>Export Backup (.zip)</strong> button to download your wallet
+                        files.</li>
+                    <li>Every time you open the app, upload your latest backup zip file using the file selector.</li>
+                    <li>We highly recommend switching to a Chromium-based browser to experience seamless local-first
+                        auto-saves.</li>
+                </ol>
+            </div>
+        </section>
+
+        <section>
+            <h2>2. Post-Quantum Security & Keys</h2>
+            <div class="card">
+                <h3>What keys does this wallet generate?</h3>
+                <p>
+                    When initialized, the wallet uses WebAssembly to derive six cryptographic keys from your master
+                    seed:
+                </p>
+                <ul>
+                    <li><code>secp256k1</code>: Classical EVM signing key (compatible with Rabby/MetaMask).</li>
+                    <li><code>Ed25519</code>: Classical EdDSA key used for peer-to-peer messaging and W3C Verifiable
+                        Credentials.</li>
+                    <li><code>BLS12-381</code>: Sync committee signature aggregation key.</li>
+                    <li><code>ML-DSA-87</code>: CRYSTALS-Dilithium5 post-quantum signing key.</li>
+                    <li><code>SLH-DSA</code>: SPHINCS+ post-quantum signing key.</li>
+                    <li><code>Falcon-512</code>: Post-quantum signing key.</li>
+                </ul>
+            </div>
+
+            <div class="card">
+                <h3>How do I back up my keys?</h3>
+                <p>
+                    Since this is a local-first wallet, we never run server-side backups. Go to <strong>Settings ->
+                        Export Key Backup</strong> and download the encrypted ZIP. The backup is encrypted using
+                    <code>Argon2id</code> and <code>AES-256-GCM</code> derived from your password.
+                </p>
+            </div>
+        </section>
+
+        <section>
+            <h2>3. Cross-Chain NFT Sales & Intent Resolver</h2>
+            <div class="card">
+                <h3>How does the NFT sale work without bridges?</h3>
+                <p>
+                    Instead of a custodial bridge, we use a <strong>Saga Intent Resolver</strong> model:
+                </p>
+                <ol>
+                    <li>You sign a purchase intent stating you will pay a fixed amount of <strong>EURe</strong>
+                        (regulated stablecoin) on Gnosis Chain.</li>
+                    <li>The Snowman consensus sub-committee monitors Gnosis Chain for your payment receipt.</li>
+                    <li>Once payment is confirmed, the sub-committee updates the Verkle state tree on the stateless
+                        chain to assign the NFT to your address.</li>
+                    <li>Your wallet fetches the updated Verkle witness proof, and the NFT is fully yours.</li>
+                </ol>
+            </div>
+        </section>
+
+        <section>
+            <h2>4. NFC e-Paper Displays</h2>
+            <div class="card">
+                <h3>How do I write my NFT to the NFC e-Paper?</h3>
+                <p>
+                    The app supports flashing your NFT image directly to a <strong> 1.54" NFC-Powered e-Paper
+                        display</strong>:
+                </p>
+                <ol>
+                    <li>Open this dApp in <strong>Chrome on Android</strong> (which supports Web NFC).</li>
+                    <li>Click <strong>Flash to e-Paper</strong> on your NFT card.</li>
+                    <li>Hold your epaper display against the NFC antenna of your phone.</li>
+                </ol>
+                <p>
+                    If you are on desktop or a non-compatible device, click <strong>Download Bin</strong> to save the
+                    dithered image data, and use the epaper Android App to flash it.
+                </p>
+            </div>
+        </section>
+
+        <section>
+            <h2>5. Auditability</h2>
+            <div class="card">
+                <h3>How do I verify this app is safe?</h3>
+                <p>
+                    This app is packaged as a <strong>single HTML file</strong> with zero remote fetches (no CDN, no
+                    external scripts).
+                    You can audit it easily:
+                </p>
+                <ol>
+                    <li>Open this HTML file in any plain text editor.</li>
+                    <li>Paste the code into an LLM or run static analysis.</li>
+                    <li>Verify there are no remote API keys, tracking, or network calls other than your local node RPC.
+                    </li>
+                </ol>
+            </div>
+        </section>
+    </div>
+</body>
+
+</html>

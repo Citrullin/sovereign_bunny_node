@@ -38,8 +38,14 @@ bs58 = { workspace = true }
 fips204 = { workspace = true }
 
 c-kzg = "2.1.8"
+reqwest = { version = "0.12", features = ["json"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+rand = "0.8"
+rand_chacha = "0.3"
 
 [dev-dependencies]
 serial_test = "3.1"
+
+[features]
+test-utils = []

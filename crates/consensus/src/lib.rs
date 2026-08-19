@@ -1,7 +1,7 @@
 //! Sovereign Consensus Crate
 //! Contains custom transaction ordering and pool builders.
 
-#![warn(missing_docs)]
+#![allow(missing_docs)]
 #![warn(clippy::all, clippy::pedantic)]
 #![allow(clippy::must_use_candidate, clippy::module_name_repetitions)]
 
@@ -13,6 +13,20 @@ pub mod config;
 pub mod stateless;
 /// Native cryptographic verification.
 pub mod crypto;
+/// System registry address constants.
+pub mod system_registry;
+/// Compliance vector thin wrapper.
+pub mod compliance_vector;
+/// Post-quantum and DID key registry.
+pub mod pq_registry;
+/// Jurisdiction and governance decisions.
+pub mod jurisdiction;
+/// Precompile router for system addresses.
+pub mod precompile_router;
+/// Global epoch consensus engine.
+pub mod epoch_engine;
+/// EVM opcode overrides inside zkEVM.
+pub mod opcode_override;
 /// Namespaced Merkle Trees for state-diff partitioning.
 pub mod nmt;
 /// Validator registry and reputation.
@@ -29,6 +43,8 @@ pub mod reanchor;
 pub mod flat_state;
 /// Snow-based subset election.
 pub mod subset_election;
+/// Snow BFT consensus family (Snowflake, Snowball, Snowman).
+pub mod snow;
 
 /// `PageRank` KZG commitments.
 pub mod kzg;

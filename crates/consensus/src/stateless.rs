@@ -22,6 +22,10 @@ pub struct StaticWitnessProof {
     pub target_account: Address,
     pub state_root: B256,
     pub proof_data: Vec<u8>,
+    /// Caller's compliance vector snapshot
+    pub quadrant_matrix: [u64; 4],
+    /// Verkle opening of Compliance Filter Stem leaf
+    pub compliance_proof: Vec<u8>,
 }
 
 /// A block-lattice block representing a transaction on an account chain
@@ -134,6 +138,8 @@ impl scale::Encode for StaticWitnessProof {
         self.target_account.0.encode_to(dest);
         self.state_root.0.encode_to(dest);
         self.proof_data.encode_to(dest);
+        self.quadrant_matrix.encode_to(dest);
+        self.compliance_proof.encode_to(dest);
     }
 }
 
@@ -142,7 +148,15 @@ impl scale::Decode for StaticWitnessProof {
         let target_account = Address::from(<[u8; 20]>::decode(input)?);
         let state_root = B256::from(<[u8; 32]>::decode(input)?);
         let proof_data = Vec::<u8>::decode(input)?;
-        Ok(StaticWitnessProof { target_account, state_root, proof_data })
+        let quadrant_matrix = <[u64; 4]>::decode(input)?;
+        let compliance_proof = Vec::<u8>::decode(input)?;
+        Ok(StaticWitnessProof {
+            target_account,
+            state_root,
+            proof_data,
+            quadrant_matrix,
+            compliance_proof,
+        })
     }
 }
 
@@ -302,6 +316,8 @@ pub enum SovereignError {
     InsufficientSolvencyForBandwidth,
     /// Subsumption check failed
     ComplianceFailure,
+    /// Caller does not possess required membership bits in Q3
+    MembershipViolation,
 }
 
 /// Pre-flight Sovereign pipeline executor.
@@ -339,6 +355,14 @@ impl SovereignExecutor {
         let contract_q2 = contract_witness.quadrant_matrix[2];
         let category_overlap = (user_q2 & contract_q2) != 0;
 
+        // 4. Q3 Membership Zone Check: (User_Q3 & Contract_Q3) != 0 (only if contract has Q3 requirements)
+        let mut membership_ok = true;
+        if contract_witness.quadrant_matrix[3] != 0 {
+            let user_q3 = caller_witness.quadrant_matrix[3];
+            let contract_q3 = contract_witness.quadrant_matrix[3];
+            membership_ok = (user_q3 & contract_q3) != 0;
+        }
+
         // Compute dynamic penalty multiplier based on compliance alignment
         let mut multiplier = 1.0;
         if !subsumed {
@@ -346,6 +370,9 @@ impl SovereignExecutor {
         }
         if !category_overlap {
             multiplier += 5.0;
+        }
+        if !membership_ok {
+            multiplier += 20.0;
         }
 
         // Incorporate the VelocityEngine's non-linear gas escalation scalar
@@ -586,9 +613,9 @@ pub fn execute_lattice_block(block: &LatticeBlock) -> Result<B256, &'static str>
 
     // 3. Verify account is not locked
     if frontier.locked {
-        // Evaluate 1-minute timeout
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
-        if now > frontier.locked_at + 60 {
+        // ARCH-02: Evaluate 1-epoch timeout instead of wall-clock.
+        // We use reg.current_block as the logical epoch counter.
+        if reg.current_block > frontier.locked_at {
             // Unlock account due to timeout
             frontier.locked = false;
             frontier.paused_context = None;
@@ -624,18 +651,41 @@ pub fn execute_lattice_block(block: &LatticeBlock) -> Result<B256, &'static str>
         let payload_bytes = scale::Encode::encode(&block.payload);
         let payload_hash = alloy_primitives::keccak256(&payload_bytes);
 
-        let mut sig_bytes = block.signature.clone();
-        if sig_bytes.len() == 65 {
-            sig_bytes.truncate(64);
-        }
-        let verifying_key = k256::ecdsa::VerifyingKey::from_sec1_bytes(&ident.doc.secp256k1_pubkey)
-            .map_err(|_| "Invalid Secp256k1 public key in DID document")?;
-        let sig = k256::ecdsa::Signature::from_slice(&sig_bytes)
-            .map_err(|_| "Invalid Secp256k1 signature format")?;
+        // SEC-02: Use registered public key matching the key tier or Zero Latency Quantum Trigger status
+        let quantum_threat = reg.dynamic_cfg.read().unwrap().zero_latency_quantum_trigger;
+        let tier = reg.did_key_tier.get(&block.account).copied().unwrap_or(crate::pq_registry::KeyTier::Classical);
         
-        use k256::ecdsa::signature::hazmat::PrehashVerifier as _;
-        verifying_key.verify_prehash(&payload_hash[..], &sig)
-            .map_err(|_| "LatticeBlock signature verification failed")?;
+        if quantum_threat || tier == crate::pq_registry::KeyTier::QuantumOnly {
+            // Verify PQ signature (ML-DSA) from the static witness sidecar/envelope
+            let pq_pub = reg.pq_keys.get(&block.account)
+                .ok_or("Post-Quantum public key not registered for locked or quantum-only account")?;
+            
+            // In custom lattice block, the first static witness's proof_data represents the PQ signature proof
+            let pq_witness = block.static_witnesses.first()
+                .ok_or("Missing Post-Quantum static witness signature on lattice block")?;
+            let pq_sig = &pq_witness.proof_data;
+                
+            crate::crypto::verify_signature(
+                crate::crypto::SignatureScheme::MlDsa,
+                pq_pub,
+                payload_hash.as_slice(),
+                pq_sig,
+                true,
+            ).map_err(|_| "LatticeBlock PQ signature verification failed")?;
+        } else {
+            let mut sig_bytes = block.signature.clone();
+            if sig_bytes.len() == 65 {
+                sig_bytes.truncate(64);
+            }
+            let verifying_key = k256::ecdsa::VerifyingKey::from_sec1_bytes(&ident.doc.secp256k1_pubkey)
+                .map_err(|_| "Invalid Secp256k1 public key in DID document")?;
+            let sig = k256::ecdsa::Signature::from_slice(&sig_bytes)
+                .map_err(|_| "Invalid Secp256k1 signature format")?;
+            
+            use k256::ecdsa::signature::hazmat::PrehashVerifier as _;
+            verifying_key.verify_prehash(&payload_hash[..], &sig)
+                .map_err(|_| "LatticeBlock traditional signature verification failed")?;
+        }
     }
 
     // 6. Handle payload types
@@ -1076,6 +1126,8 @@ mod tests {
                 target_account: bob_addr,
                 state_root: recv_hash, // matches Bob's latest frontier hash
                 proof_data: vec![],
+                quadrant_matrix: [0; 4],
+                compliance_proof: vec![],
             }],
         };
         assert!(execute_lattice_block(&block_static_pass).is_ok());

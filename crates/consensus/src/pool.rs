@@ -261,34 +261,8 @@ pub fn compute_lattice_balance(
     initial_balance: alloy_primitives::U256,
 ) -> alloy_primitives::U256 {
     let mut balance = initial_balance;
-    
-    for block in reg.lattice_blocks.values() {
-        if block.account == address {
-            match &block.payload {
-                crate::stateless::LatticePayload::Send { amount, .. } => {
-                    balance = balance.saturating_sub(*amount);
-                }
-                _ => {}
-            }
-        }
-        if let crate::stateless::LatticePayload::Receive { amount, .. } = &block.payload {
-            if block.account == address {
-                balance = balance.saturating_add(*amount);
-            }
-        }
-    }
-    balance
-}
 
-/// Helper to compute the dynamic lattice-enforced balance of an address, including auto-claimable inbox sends.
-pub fn compute_lattice_balance_with_autoclaim(
-    address: alloy_primitives::Address,
-    reg: &crate::registry::ValidatorRegistry,
-    initial_balance: alloy_primitives::U256,
-) -> alloy_primitives::U256 {
-    let mut balance = compute_lattice_balance(address, reg, initial_balance);
-
-    // Identify all claimed send hashes
+    // Build a quick local set of claimed sends
     let mut claimed = std::collections::HashSet::new();
     for block in reg.lattice_blocks.values() {
         if let crate::stateless::LatticePayload::Receive { send_block_hash, .. } = &block.payload {
@@ -296,25 +270,32 @@ pub fn compute_lattice_balance_with_autoclaim(
         }
     }
 
-    // Collect all unclaimed sends targeting this address
-    let mut pending = Vec::new();
+    // Filter lattice blocks only associated with the address (acting as index)
     for (hash, block) in &reg.lattice_blocks {
+        // 1. If we are the sender of a Send block: subtract it
+        if block.account == address {
+            if let crate::stateless::LatticePayload::Send { amount, .. } = &block.payload {
+                balance = balance.saturating_sub(*amount);
+            }
+        }
+        // 2. If we are the recipient of a Send block:
         if let crate::stateless::LatticePayload::Send { recipient, amount } = &block.payload {
-            if *recipient == address && !claimed.contains(hash) {
-                pending.push((*hash, *amount));
+            if *recipient == address {
+                let is_evm_tx = block.signature.is_empty();
+                if is_evm_tx {
+                    // Standard EVM tx: subtract if unclaimed
+                    if !claimed.contains(hash) {
+                        balance = balance.saturating_sub(*amount);
+                    }
+                } else {
+                    // Custom block-lattice transfer: add if claimed
+                    if claimed.contains(hash) {
+                        balance = balance.saturating_add(*amount);
+                    }
+                }
             }
         }
     }
-
-    // Sort by highest amount first (Rule 3)
-    pending.sort_by(|a, b| b.1.cmp(&a.1));
-
-    // Limit to MAX_INBOX_BATCH = 20
-    let batch = pending.iter().take(20);
-    for (_, amount) in batch {
-        balance = balance.saturating_add(*amount);
-    }
-
     balance
 }
 
@@ -355,68 +336,106 @@ where
         transaction: Self::Transaction,
     ) -> TransactionValidationOutcome<Self::Transaction> {
         let registry_lock = crate::registry::get_registry();
+        let sender = transaction.sender();
 
-        // Enforce that zero-gas transactions are only allowed for pure self-sends
-        let is_pure_self_send = transaction.to() == Some(transaction.sender()) && transaction.input().is_empty();
-        let gas_price = transaction.gas_price().unwrap_or(0);
-        if gas_price == 0 && !is_pure_self_send {
+        // ── Gate 0: Compliance check ──────────────────────────────────────
+        if let Ok(reg) = registry_lock.read() {
+            if let Some(frontier) = reg.account_frontiers.get(&sender) {
+                if let Some(comp) = &frontier.cached_compliance {
+                    if let Some(j_vector) = reg.jurisdiction_vectors.get(&1) {
+                        let active_q1 = comp.q1();
+                        let target_q1 = j_vector.active_q1_mask;
+                        if (active_q1 & target_q1) != 0 {
+                            tracing::warn!(?sender, "Gate 0 block: Sender has conflicting jurisdiction bits");
+                            return TransactionValidationOutcome::Invalid(
+                                transaction,
+                                InvalidTransactionError::TxTypeNotSupported.into(),
+                            );
+                        }
+
+                        if j_vector.required_q2_mask != 0 && (comp.q2() & j_vector.required_q2_mask) == 0 {
+                            tracing::warn!(?sender, "Gate 0 block: Sender entity class not eligible");
+                            return TransactionValidationOutcome::Invalid(
+                                transaction,
+                                InvalidTransactionError::TxTypeNotSupported.into(),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Gate 0: DID Registration validation ───────────────────────────
+        let is_did_reg = if let Some(to) = transaction.to() {
+            to == crate::system_registry::SYSTEM_DID_REGISTRY
+        } else {
+            false
+        };
+        if !is_did_reg {
+            if let Ok(reg) = registry_lock.read() {
+                if let Some(did) = reg.get_did_by_address(&sender) {
+                    if !reg.is_did_fully_registered(&did) {
+                        tracing::warn!(?sender, "Rejecting transaction in pool: Active DID not fully registered");
+                        return TransactionValidationOutcome::Invalid(
+                            transaction,
+                            InvalidTransactionError::TxTypeNotSupported.into(),
+                        );
+                    }
+                } else {
+                    tracing::warn!(?sender, "Rejecting transaction in pool: Sender has no registered DID");
+                    return TransactionValidationOutcome::Invalid(
+                        transaction,
+                        InvalidTransactionError::TxTypeNotSupported.into(),
+                    );
+                }
+            }
+        }
+
+        // ── Gate 1: Zero-gas tx validation ────────────────────────────────
+        let gas_price = transaction.gas_price().unwrap_or_else(|| transaction.max_fee_per_gas());
+        let is_system_receive = if let Some(recipient) = transaction.to() {
+            recipient == crate::system_registry::SYSTEM_RECEIVE_HOOK
+        } else {
+            false
+        };
+
+        if gas_price == 0 && !is_system_receive && !is_did_reg {
             return TransactionValidationOutcome::Invalid(
                 transaction,
                 InvalidTransactionError::TxTypeNotSupported.into(),
             );
         }
 
-        // 1. Call standard inner transaction validator
-        let inner_outcome = self.inner.validate_transaction(origin, transaction.clone()).await;
-        
-        // 2. Intercept and override insufficient funds errors if auto-claimable balance is solvent
-        let final_outcome = match inner_outcome {
-            TransactionValidationOutcome::Invalid(tx, err) => {
-                let sender = tx.sender();
-                let is_block_lattice = if let Ok(reg) = registry_lock.read() {
-                    let has_key = reg.address_to_did.contains_key(&sender);
-                    tracing::info!(?sender, has_key, "Consensus pool validator: check is_block_lattice");
-                    has_key
-                } else {
-                    false
-                };
-                if is_block_lattice {
-                    if let Ok(reg) = registry_lock.read() {
-                        let initial_balance = self.client.get_balance(sender);
-                        let lattice_balance = compute_lattice_balance_with_autoclaim(sender, &reg, initial_balance);
-                        let gas_price = tx.gas_price().unwrap_or(0);
-                        let needed = tx.value().saturating_add(alloy_primitives::U256::from(tx.gas_limit()).saturating_mul(alloy_primitives::U256::from(gas_price)));
-                        tracing::info!(?sender, ?lattice_balance, ?needed, ?gas_price, "Consensus pool validator: evaluating sweep override");
-                        if lattice_balance >= needed {
-                            tracing::info!(?sender, "Consensus pool validator: OVERRIDING validation to Valid!");
-                            TransactionValidationOutcome::Valid {
-                                balance: lattice_balance,
-                                state_nonce: tx.nonce(),
-                                bytecode_hash: None,
-                                transaction: reth_transaction_pool::validate::ValidTransaction::Valid(tx),
-                                propagate: true,
-                                authorities: None,
-                            }
-                        } else {
-                            TransactionValidationOutcome::Invalid(tx, err)
-                        }
-                    } else {
-                        TransactionValidationOutcome::Invalid(tx, err)
-                    }
-                } else {
-                    TransactionValidationOutcome::Invalid(tx, err)
-                }
-            }
-            other => other,
+        // ── Gate 2: ZLQT validation ───────────────────────────────────────
+        let (quantum_threat, default_pq_scheme) = if let Ok(reg) = registry_lock.read() {
+            let dynamic = reg.dynamic_cfg.read().unwrap();
+            (dynamic.zero_latency_quantum_trigger, dynamic.default_pq_scheme.clone())
+        } else {
+            (false, "mldsa".to_string())
         };
 
-        if let TransactionValidationOutcome::Invalid(tx, err) = &final_outcome {
-            return final_outcome;
+        if quantum_threat && !is_did_reg {
+            if let Ok(reg) = registry_lock.read() {
+                if let Some(tier) = reg.did_key_tier.get(&sender) {
+                    if *tier == crate::pq_registry::KeyTier::Classical {
+                        tracing::warn!(?sender, "Rejecting transaction in pool: Account is Classical tier under active ZLQT");
+                        return TransactionValidationOutcome::Invalid(
+                            transaction,
+                            InvalidTransactionError::TxTypeNotSupported.into(),
+                        );
+                    }
+                } else {
+                    tracing::warn!(?sender, "Rejecting transaction in pool: Unregistered account under active ZLQT");
+                    return TransactionValidationOutcome::Invalid(
+                        transaction,
+                        InvalidTransactionError::TxTypeNotSupported.into(),
+                    );
+                }
+            }
         }
 
-        // Block-Lattice lock check:
+        // ── Gate 3: Locked check ──────────────────────────────────────────
         if let Ok(reg) = registry_lock.read() {
-            let sender = transaction.sender();
             if let Some(frontier) = reg.account_frontiers.get(&sender) {
                 if frontier.locked {
                     tracing::warn!(?sender, "Rejecting transaction in pool: Sender account is locked");
@@ -439,18 +458,17 @@ where
             }
         }
 
-        // Block-Lattice balance check:
+        // ── Gate 4: Balance solvency check ────────────────────────────────
         if let Ok(reg) = registry_lock.read() {
-            let sender = transaction.sender();
             let initial_balance = self.client.get_balance(sender);
-            let lattice_balance = compute_lattice_balance_with_autoclaim(sender, &reg, initial_balance);
+            let lattice_balance = compute_lattice_balance(sender, &reg, initial_balance);
             let tx_value = transaction.value();
             if lattice_balance < tx_value {
                 tracing::warn!(
                     ?sender,
                     ?lattice_balance,
                     ?tx_value,
-                    "Rejecting transaction in pool: Insufficient lattice balance (Pending incoming transfers must be claimed via Receive blocks)"
+                    "Rejecting transaction in pool: Insufficient lattice balance"
                 );
                 return TransactionValidationOutcome::Invalid(
                     transaction,
@@ -459,25 +477,12 @@ where
             }
         }
 
-        // Add to account pool queue
-        {
-            let mut queues = self.account_queues.lock().unwrap();
-            queues.entry(transaction.sender()).or_default().push(*transaction.hash());
-        }
-
-        let (quantum_threat, default_pq_scheme) = if let Ok(reg) = registry_lock.read() {
-            let dynamic = reg.dynamic_cfg.read().unwrap();
-            (dynamic.zero_latency_quantum_trigger, dynamic.default_pq_scheme.clone())
-        } else {
-            (false, "mldsa".to_string())
-        };
-
-        if quantum_threat {
-            // Try to unpack PQ envelope from calldata / input
+        // ── Gate 5: PQ envelope check if quantum_threat ───────────────────
+        if quantum_threat && !is_did_reg {
             let Ok((scheme, pk, sig)) = crate::crypto::unpack_pq_envelope(transaction.input().as_ref()) else {
                 tracing::warn!(
                     hash = ?transaction.hash(),
-                    "Rejecting standard transaction in pool: Zero Latency Quantum Trigger active (missing or invalid PQ envelope)"
+                    "Rejecting standard transaction in pool: Zero Latency Quantum Trigger active (missing/invalid PQ envelope)"
                 );
                 return TransactionValidationOutcome::Invalid(
                     transaction,
@@ -485,7 +490,6 @@ where
                 );
             };
 
-            // Enforce PQ scheme matches default scheme configured
             let configured_scheme = crate::crypto::parse_scheme(&default_pq_scheme).unwrap_or(crate::crypto::SignatureScheme::MlDsa);
             if scheme != configured_scheme {
                 return TransactionValidationOutcome::Invalid(
@@ -494,8 +498,16 @@ where
                 );
             }
 
-            // Verify signature natively
-            let msg = transaction.hash().as_slice();
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(transaction.sender().as_slice());
+            bytes.extend_from_slice(&transaction.nonce().to_be_bytes());
+            if let Some(to) = transaction.to() {
+                bytes.extend_from_slice(to.as_slice());
+            }
+            bytes.extend_from_slice(&transaction.value().to_be_bytes::<32>());
+            let hash = alloy_primitives::keccak256(&bytes);
+            let msg = hash.as_slice();
+
             if crate::crypto::verify_signature(scheme, &pk, msg, &sig, true).is_err() {
                 return TransactionValidationOutcome::Invalid(
                     transaction,
@@ -503,15 +515,67 @@ where
                 );
             }
 
-            // Verify sender matches derived address
             let hash_scheme = scheme.default_address_hash();
             let derived_addr = alloy_primitives::Address::from(crate::crypto::derive_address(hash_scheme, &pk));
-            if derived_addr != transaction.sender() {
+            
+            // ARCH-04: In wrapped mode, the sender recovered from Secp256k1 will be different from the derived PQ address.
+            // Check that the derived PQ address matches OR the registered PQ key for the sender matches pk.
+            let mut matches_identity = derived_addr == transaction.sender();
+            if !matches_identity {
+                if let Ok(reg) = registry_lock.read() {
+                    if let Some(registered_pq) = reg.pq_keys.get(&transaction.sender()) {
+                        if registered_pq == &pk {
+                            matches_identity = true;
+                        }
+                    }
+                }
+            }
+
+            if !matches_identity {
                 return TransactionValidationOutcome::Invalid(
                     transaction,
                     InvalidTransactionError::TxTypeNotSupported.into(),
                 );
             }
+        }
+
+        // ── Call standard inner transaction validator ────────────────────
+        let inner_outcome = self.inner.validate_transaction(origin, transaction.clone()).await;
+
+        let final_outcome = match inner_outcome {
+            TransactionValidationOutcome::Invalid(tx, err) => {
+                if let Ok(reg) = registry_lock.read() {
+                    let initial_balance = self.client.get_balance(sender);
+                    let lattice_balance = compute_lattice_balance(sender, &reg, initial_balance);
+                    let gas_price = tx.gas_price().unwrap_or_else(|| tx.max_fee_per_gas());
+                    let needed = tx.value().saturating_add(alloy_primitives::U256::from(tx.gas_limit()).saturating_mul(alloy_primitives::U256::from(gas_price)));
+                    if lattice_balance >= needed {
+                        TransactionValidationOutcome::Valid {
+                            balance: lattice_balance,
+                            state_nonce: tx.nonce(),
+                            bytecode_hash: None,
+                            transaction: reth_transaction_pool::validate::ValidTransaction::Valid(tx),
+                            propagate: true,
+                            authorities: None,
+                        }
+                    } else {
+                        TransactionValidationOutcome::Invalid(tx, err)
+                    }
+                } else {
+                    TransactionValidationOutcome::Invalid(tx, err)
+                }
+            }
+            other => other,
+        };
+
+        if let TransactionValidationOutcome::Invalid(_, _) = &final_outcome {
+            return final_outcome;
+        }
+
+        // Add to account pool queue
+        {
+            let mut queues = self.account_queues.lock().unwrap();
+            queues.entry(transaction.sender()).or_default().push(*transaction.hash());
         }
 
         final_outcome
@@ -795,6 +859,7 @@ mod tests {
         use reth_transaction_pool::noop::MockTransactionValidator;
         use crate::crypto::{pack_pq_envelope, SignatureScheme};
         use fips204::traits::{KeyGen, Signer, SerDes};
+        use alloy_consensus::Transaction;
 
         let validator = SovereignQuantumTransactionValidator::new(MockTransactionValidator::default(), ());
         let tx = MockTransaction::eip1559();
@@ -803,41 +868,99 @@ mod tests {
         {
             let mut reg = registry_lock.write().unwrap();
             *reg = crate::registry::ValidatorRegistry::default();
+            
+            // Register DID for the mock transaction sender to satisfy Gate 0 check
+            let did = format!("did:sovereign:1337:{}", tx.sender().to_string().to_lowercase());
+            reg.address_to_did.insert(tx.sender(), did.clone());
+            reg.peer_keys.insert(did.clone(), [0x01; 32]);
+            let mut doc = sovereign_identity::did::SovereignDidDocument::derive_from_seed(alloy_primitives::B256::repeat_byte(0xbc));
+            doc.evm_address = tx.sender();
+            reg.identities.insert(did.clone(), crate::registry::RegisteredIdentity {
+                did,
+                doc,
+                registered_at: 0,
+            });
+
             let mut dynamic = reg.dynamic_cfg.write().unwrap();
             dynamic.zero_latency_quantum_trigger = false;
             dynamic.default_pq_scheme = "mldsa".to_string();
         }
 
+        {
+            let reg = registry_lock.read().unwrap();
+            let sender = tx.sender();
+            let did_opt = reg.get_did_by_address(&sender);
+            println!("TEST SENDER DID: {:?}", did_opt);
+            if let Some(ref did) = did_opt {
+                println!("IS FULLY REG: {}", reg.is_did_fully_registered(did));
+                if let Some(ident) = reg.identities.get(did) {
+                    println!("SECP: {}, ED: {}, BLS: {}, ML: {}, SLH: {}, FALCON: {}, XMSS: {}",
+                        !ident.doc.secp256k1_pubkey.is_empty(),
+                        !ident.doc.ed25519_pubkey.is_empty(),
+                        !ident.doc.bls_pubkey.is_empty(),
+                        !ident.doc.ml_dsa_pubkey.is_empty(),
+                        !ident.doc.slh_dsa_pubkey.is_empty(),
+                        !ident.doc.falcon_pubkey.is_empty(),
+                        !ident.doc.xmss_pubkey.is_empty()
+                    );
+                }
+            }
+        }
+
         // When quantum trigger is false, transaction is valid
         let res = validator.validate_transaction(TransactionOrigin::External, tx.clone()).await;
+        println!("VALIDATION RESULT IS: {:?}", res);
         assert!(matches!(res, TransactionValidationOutcome::Valid { .. }));
+
+        // Generate real ML-DSA key pair and signature
+        let (pk_struct, sk_struct) = fips204::ml_dsa_65::KG::try_keygen().unwrap();
+        let pk_bytes = pk_struct.into_bytes();
+        let derived_addr = alloy_primitives::Address::from(crate::crypto::derive_address(crate::crypto::HashScheme::Poseidon, &pk_bytes));
 
         // Enable quantum trigger
         {
-            let reg = registry_lock.read().unwrap();
-            let mut dynamic = reg.dynamic_cfg.write().unwrap();
-            dynamic.zero_latency_quantum_trigger = true;
+            let mut reg = registry_lock.write().unwrap();
+            {
+                let mut dynamic = reg.dynamic_cfg.write().unwrap();
+                dynamic.zero_latency_quantum_trigger = true;
+            }
+            reg.did_key_tier.insert(derived_addr, crate::pq_registry::KeyTier::QuantumReady);
+
+            // Register DID for derived_addr
+            let did = format!("did:sovereign:1337:{}", derived_addr.to_string().to_lowercase());
+            reg.address_to_did.insert(derived_addr, did.clone());
+            reg.peer_keys.insert(did.clone(), [0x01; 32]);
+            let mut doc = sovereign_identity::did::SovereignDidDocument::derive_from_seed(alloy_primitives::B256::repeat_byte(0xbc));
+            doc.evm_address = derived_addr;
+            reg.identities.insert(did.clone(), crate::registry::RegisteredIdentity {
+                did,
+                doc,
+                registered_at: 0,
+            });
         }
 
         // When quantum trigger is true, standard transaction (without PQ envelope) MUST be rejected
         let res = validator.validate_transaction(TransactionOrigin::External, tx.clone()).await;
         assert!(matches!(res, TransactionValidationOutcome::Invalid(_, _)));
 
-        // Generate real ML-DSA key pair and signature
-        let (pk_struct, sk_struct) = fips204::ml_dsa_65::KG::try_keygen().unwrap();
-        let pk_bytes = pk_struct.into_bytes();
-
         let mut pq_tx = MockTransaction::eip1559();
-        let msg = pq_tx.hash();
-        let sig_bytes = sk_struct.try_sign(msg.as_slice(), &[]).unwrap();
+        pq_tx.set_sender(derived_addr);
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(derived_addr.as_slice());
+        bytes.extend_from_slice(&pq_tx.nonce().to_be_bytes());
+        if let Some(to) = pq_tx.to() {
+            bytes.extend_from_slice(to.as_slice());
+        }
+        bytes.extend_from_slice(&pq_tx.value().to_be_bytes::<32>());
+        let hash = alloy_primitives::keccak256(&bytes);
+        let msg = hash.as_slice();
+
+        let sig_bytes = sk_struct.try_sign(msg, &[]).unwrap();
 
         let env_bytes = pack_pq_envelope(SignatureScheme::MlDsa, &pk_bytes, &sig_bytes);
 
-        // Derive EVM address of sender matching derived key
-        let derived_addr = alloy_primitives::Address::from(crate::crypto::derive_address(crate::crypto::HashScheme::Poseidon, &pk_bytes));
-
         pq_tx.set_input(env_bytes.into());
-        pq_tx.set_sender(derived_addr);
 
         // Validate PQ envelope transaction
         let res = validator.validate_transaction(TransactionOrigin::External, pq_tx).await;
@@ -870,7 +993,7 @@ mod tests {
             previous_hash: B256::ZERO,
             sequence: 1,
             payload: crate::stateless::LatticePayload::Send { recipient: bob, amount: alloy_primitives::U256::from(3_000_000_000_000_000_000u128) },
-            signature: vec![],
+            signature: vec![1, 2, 3],
             static_witnesses: vec![],
         };
         reg.lattice_blocks.insert(B256::repeat_byte(0x11), send_block);

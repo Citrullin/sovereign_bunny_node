@@ -9,6 +9,10 @@ pub struct StaticConfig {
     pub epoch: EpochConfig,
     /// Data Availability Sampling parameters.
     pub das: DasConfig,
+    /// Snowman consensus parameters.
+    pub snowman: SnowmanConfig,
+    /// Merit progressive distribution parameters.
+    pub merit: MeritTierConfig,
 }
 
 impl Default for StaticConfig {
@@ -17,6 +21,8 @@ impl Default for StaticConfig {
             pagerank: PageRankConfig::default(),
             epoch: EpochConfig::default(),
             das: DasConfig::default(),
+            snowman: SnowmanConfig::default(),
+            merit: MeritTierConfig::default(),
         }
     }
 }
@@ -156,6 +162,54 @@ impl Default for DynamicConfig {
             connectivity_decay_penalty: 0.10,
             parallel_execution_engine: "wave".to_string(),
             caip_registry: default_caip_registry(),
+        }
+    }
+}
+
+/// Snowman consensus parameters.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnowmanConfig {
+    /// Sample size k
+    pub k: usize,
+    /// Quorum fraction alpha
+    pub alpha: f64,
+    /// Finalization successes beta
+    pub beta: u32,
+}
+
+impl Default for SnowmanConfig {
+    fn default() -> Self {
+        Self {
+            k: 10,
+            alpha: 0.8,
+            beta: 15,
+        }
+    }
+}
+
+/// Merit progressive distribution parameters.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MeritTierConfig {
+    /// Interval in epochs for Rank0 (e.g. 90)
+    pub rank_0_interval: u64,
+    /// Interval in epochs for Rank1 (e.g. 30)
+    pub rank_1_interval: u64,
+    /// Interval in epochs for Rank2 (e.g. 14)
+    pub rank_2_interval: u64,
+    /// Interval in epochs for Rank3 (e.g. 7)
+    pub rank_3_interval: u64,
+    /// Interval in epochs for Rank4 (e.g. 1)
+    pub rank_4_interval: u64,
+}
+
+impl Default for MeritTierConfig {
+    fn default() -> Self {
+        Self {
+            rank_0_interval: 90,
+            rank_1_interval: 30,
+            rank_2_interval: 14,
+            rank_3_interval: 7,
+            rank_4_interval: 1,
         }
     }
 }

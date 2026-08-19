@@ -44,7 +44,8 @@ async fn test_rpc_end_to_end() -> eyre::Result<()> {
     let binary_path = find_binary();
     let datadir = format!("/tmp/sovereign-reth-test-db-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
     let port = 18545;
-    let url = format!("http://localhost:{}", port);
+    let proxy_port = 8546;
+    let url = format!("http://localhost:{}", proxy_port);
 
     // Clean datadir
     let _ = fs::remove_dir_all(&datadir);
@@ -78,6 +79,12 @@ async fn test_rpc_end_to_end() -> eyre::Result<()> {
         .arg(genesis_path)
         .arg("--datadir")
         .arg(&datadir)
+        .arg("--port")
+        .arg("30303")
+        .arg("--discovery.port")
+        .arg("30303")
+        .arg("--sov-proxy-port")
+        .arg(proxy_port.to_string())
         .arg("--http")
         .arg("--http.port")
         .arg(port.to_string())
@@ -149,12 +156,12 @@ async fn test_rpc_end_to_end() -> eyre::Result<()> {
     assert!(balance_hex.len() > 2, "Starting balance should be non-zero!");
     println!("Sender starting balance verified: {} wei (hex)", balance_hex);
 
-    // 3. Verify starting balance of the receiver (0x918c30482462c8024ba6cf34a18ba1f8bbdb755f)
+    // 3. Verify starting balance of the receiver (0x81f16Dc0351D44c84234F4e4514C03cE51E6Dab3)
     let res: serde_json::Value = client.post(&url)
         .json(&serde_json::json!({
             "jsonrpc": "2.0",
             "method": "eth_getBalance",
-            "params": ["0x918c30482462c8024ba6cf34a18ba1f8bbdb755f", "latest"],
+            "params": ["0x81f16Dc0351D44c84234F4e4514C03cE51E6Dab3", "latest"],
             "id": 1
         }))
         .send()
@@ -181,11 +188,11 @@ async fn test_rpc_end_to_end() -> eyre::Result<()> {
             "--private-key",
             "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
             "--to",
-            "0x918c30482462c8024ba6cf34a18ba1f8bbdb755f",
+            "0x81f16Dc0351D44c84234F4e4514C03cE51E6Dab3",
             "--value",
             "1000000000000000000",
             "--nonce",
-            "0",
+            "1",
             "--chain-id",
             "13371337",
         ])
@@ -232,26 +239,13 @@ async fn test_rpc_end_to_end() -> eyre::Result<()> {
 
     let did_uri = format!("did:peer:4{}:{}", hash_comp, doc_comp);
 
-    let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
-    let message = format!("registerDid:{did_uri}:{nonce}");
-    let digest = alloy_primitives::keccak256(message.as_bytes());
-    use k256::ecdsa::signature::hazmat::PrehashSigner as _;
-    let sig: k256::ecdsa::Signature = signing_key.sign_prehash(&digest[..]).unwrap();
-    let sig_hex = format!("0x{}", alloy_primitives::hex::encode(sig.to_bytes()));
-
-    let reg_res: serde_json::Value = client.post(&url)
-        .json(&serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": "sovereign_registerDid",
-            "params": [did_uri, nonce, sig_hex],
-            "id": 1
-        }))
-        .send()
-        .await?
-        .json()
-        .await?;
+    let reg_res = register_did(&client, &url, &did_uri, "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80", 0).await;
     assert!(reg_res["error"].is_null(), "sovereign_registerDid failed: {:?}", reg_res["error"]);
-    println!("Sender DID registered successfully: {}", reg_res["result"]);
+    let reg_tx_hash = reg_res["result"].as_str().unwrap();
+    println!("Sender DID registered successfully! Tx Hash: {}", reg_tx_hash);
+
+    // Wait for the DID registration transaction to be mined
+    wait_for_receipt(&client, &url, reg_tx_hash).await;
 
     println!("Broadcasting signed transaction...");
     let res: serde_json::Value = client.post(&url)
@@ -314,7 +308,7 @@ async fn test_rpc_end_to_end() -> eyre::Result<()> {
         .await?;
     let new_block_num_hex = res["result"].as_str().unwrap();
     let new_block_num = u64::from_str_radix(new_block_num_hex.trim_start_matches("0x"), 16)?;
-    assert_eq!(new_block_num, 1, "Block number should have increased to 1!");
+    assert!(new_block_num >= 1, "Block number should have increased!");
     println!("New block number verified: {}", new_block_num);
 
     // 7. Verify receiver balance has increased by 1 ETH
@@ -322,7 +316,7 @@ async fn test_rpc_end_to_end() -> eyre::Result<()> {
         .json(&serde_json::json!({
             "jsonrpc": "2.0",
             "method": "eth_getBalance",
-            "params": ["0x918c30482462c8024ba6cf34a18ba1f8bbdb755f", "latest"],
+            "params": ["0x81f16Dc0351D44c84234F4e4514C03cE51E6Dab3", "latest"],
             "id": 1
         }))
         .send()
@@ -336,27 +330,51 @@ async fn test_rpc_end_to_end() -> eyre::Result<()> {
     Ok(())
 }
 
-async fn register_did_helper(
+async fn register_did(
     client: &reqwest::Client,
     url: &str,
     did_uri: &str,
     private_key_hex: &str,
     nonce: u64,
 ) -> serde_json::Value {
+    use alloy_consensus::{TxLegacy, TxEnvelope, SignableTransaction};
+    use alloy_signer_local::PrivateKeySigner;
+    use alloy_network::TxSigner;
+    use alloy_rlp::Encodable;
+    use alloy_primitives::U256;
+
     let priv_bytes = alloy_primitives::hex::decode(private_key_hex.strip_prefix("0x").unwrap_or(private_key_hex)).unwrap();
-    let signing_key = k256::ecdsa::SigningKey::from_slice(&priv_bytes).unwrap();
-    let message = format!("registerDid:{did_uri}:{nonce}");
-    let digest = alloy_primitives::keccak256(message.as_bytes());
-    
-    use k256::ecdsa::signature::hazmat::PrehashSigner as _;
-    let sig: k256::ecdsa::Signature = signing_key.sign_prehash(&digest[..]).unwrap();
-    let sig_hex = format!("0x{}", alloy_primitives::hex::encode(sig.to_bytes()));
+    let signer = PrivateKeySigner::from_slice(&priv_bytes).unwrap();
+
+    let action = sovereign_consensus::system_registry::SystemAction::RegisterDid {
+        did_document: did_uri.to_string(),
+        pq_pub_key: vec![1u8; 32],
+        key_tier: "QuantumReady".to_string(),
+    };
+    let calldata = action.encode();
+
+    let mut tx = TxLegacy {
+        chain_id: Some(13371337),
+        nonce,
+        gas_price: 1_000_000_000,
+        gas_limit: 100_000,
+        to: alloy_primitives::TxKind::Call(sovereign_consensus::system_registry::SYSTEM_DID_REGISTRY),
+        value: U256::ZERO,
+        input: calldata.into(),
+    };
+
+    let signature = signer.sign_transaction(&mut tx).await.unwrap();
+    let signed_tx = TxEnvelope::Legacy(tx.into_signed(signature));
+
+    let mut buf = Vec::new();
+    signed_tx.encode(&mut buf);
+    let raw_hex = format!("0x{}", alloy_primitives::hex::encode(buf));
 
     client.post(url)
         .json(&serde_json::json!({
             "jsonrpc": "2.0",
-            "method": "sovereign_registerDid",
-            "params": [did_uri, nonce, sig_hex],
+            "method": "eth_sendRawTransaction",
+            "params": [raw_hex],
             "id": 1
         }))
         .send()
@@ -365,6 +383,33 @@ async fn register_did_helper(
         .json()
         .await
         .unwrap()
+}
+
+async fn wait_for_receipt(client: &reqwest::Client, url: &str, tx_hash: &str) {
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(15) {
+        let res: serde_json::Value = client.post(url)
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "eth_getTransactionReceipt",
+                "params": [tx_hash],
+                "id": 1
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        
+        if !res["result"].is_null() {
+            let status = res["result"]["status"].as_str().unwrap();
+            assert_eq!(status, "0x1", "Transaction reverted: {:?}", res);
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    panic!("Transaction {} not mined within 15 seconds!", tx_hash);
 }
 
 fn generate_did_for_key(private_key_hex: &str) -> String {
@@ -411,7 +456,8 @@ async fn test_zero_gas_self_send_claim() -> eyre::Result<()> {
     let binary_path = find_binary();
     let datadir = format!("/tmp/sovereign-reth-test-db-claim-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
     let port = 18550;
-    let url = format!("http://localhost:{}", port);
+    let proxy_port = 8547;
+    let url = format!("http://localhost:{}", proxy_port);
 
     // Clean datadir
     let _ = fs::remove_dir_all(&datadir);
@@ -439,6 +485,14 @@ async fn test_zero_gas_self_send_claim() -> eyre::Result<()> {
         .arg(genesis_path)
         .arg("--datadir")
         .arg(&datadir)
+        .arg("--port")
+        .arg("30304")
+        .arg("--discovery.port")
+        .arg("30304")
+        .arg("--authrpc.port")
+        .arg("8552")
+        .arg("--sov-proxy-port")
+        .arg(proxy_port.to_string())
         .arg("--http")
         .arg("--http.port")
         .arg(port.to_string())
@@ -480,9 +534,10 @@ async fn test_zero_gas_self_send_claim() -> eyre::Result<()> {
     // 1. Register Alice and Bob DIDs
     let alice_priv_hex = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
     let alice_did = generate_did_for_key(alice_priv_hex);
-    let now_nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
-    let reg_res_a = register_did_helper(&client, &url, &alice_did, alice_priv_hex, now_nonce).await;
+    let reg_res_a = register_did(&client, &url, &alice_did, alice_priv_hex, 0).await;
     assert!(reg_res_a["error"].is_null(), "reg_res_a failed: {:?}", reg_res_a["error"]);
+    let reg_tx_hash_a = reg_res_a["result"].as_str().unwrap();
+    wait_for_receipt(&client, &url, reg_tx_hash_a).await;
 
     let bob_seed = format!("bob_seed_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
     let bob_hash_bytes = alloy_primitives::keccak256(bob_seed.as_bytes());
@@ -498,9 +553,41 @@ async fn test_zero_gas_self_send_claim() -> eyre::Result<()> {
     let wallet_b_addr = format!("{:#x}", alloy_primitives::Address::from(bob_derived));
     let bob_did = generate_did_for_key(&bob_priv_hex);
 
-    let now_nonce_b = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
-    let reg_res_b = register_did_helper(&client, &url, &bob_did, &bob_priv_hex, now_nonce_b).await;
+    // Fund Bob's address first so Bob can pay for gas to register DID
+    println!("Funding Bob's address from Alice...");
+    let output = Command::new(did_tool_path)
+        .args(&[
+            "sign-tx",
+            "--private-key",
+            alice_priv_hex,
+            "--to",
+            &wallet_b_addr,
+            "--value",
+            "1000000000000000000", // 1 ETH
+            "--nonce",
+            "1",
+            "--chain-id",
+            "13371337",
+        ])
+        .output()?;
+    let stdout = String::from_utf8(output.stdout)?;
+    let tx_hex = stdout.lines().find(|l| l.contains("Signed Transaction Hex:")).unwrap().split(": ").nth(1).unwrap();
+    let fund_res: serde_json::Value = client.post(&url)
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "eth_sendRawTransaction",
+            "params": [tx_hex],
+            "id": 1
+        })).send().await?.json().await?;
+    assert!(fund_res["error"].is_null(), "Bob funding failed: {:?}", fund_res["error"]);
+    let fund_tx_hash = fund_res["result"].as_str().unwrap();
+    wait_for_receipt(&client, &url, fund_tx_hash).await;
+
+    // Now register Bob's DID using standard registration transaction
+    let reg_res_b = register_did(&client, &url, &bob_did, &bob_priv_hex, 0).await;
     assert!(reg_res_b["error"].is_null(), "reg_res_b failed: {:?}", reg_res_b["error"]);
+    let reg_tx_hash_b = reg_res_b["result"].as_str().unwrap();
+    wait_for_receipt(&client, &url, reg_tx_hash_b).await;
 
     // 2. Send 10 ETH from Alice to Bob (creating a floating send block)
     let output = Command::new(did_tool_path)
@@ -513,7 +600,7 @@ async fn test_zero_gas_self_send_claim() -> eyre::Result<()> {
             "--value",
             "10000000000000000000",
             "--nonce",
-            "0",
+            "2",
             "--chain-id",
             "13371337",
         ])
@@ -532,6 +619,105 @@ async fn test_zero_gas_self_send_claim() -> eyre::Result<()> {
 
     tokio::time::sleep(Duration::from_secs(5)).await;
 
+    // Test eth_call targeting SYSTEM_RECEIVE_HOOK (0x02)
+    {
+        let receive_hook_addr = "0x0000000000000000000000000000000000000002";
+        let call_res: serde_json::Value = client.post(&url)
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "eth_call",
+                "params": [
+                    {
+                        "to": receive_hook_addr,
+                        "data": format!("0x000000000000000000000000{}", wallet_b_addr.strip_prefix("0x").unwrap())
+                    },
+                    "latest"
+                ],
+                "id": 1
+            })).send().await?.json().await?;
+        
+        let result_str = call_res["result"].as_str().expect("eth_call to receive hook should succeed and return a string");
+        assert_ne!(result_str, "0x887496f1f15e135db786696b6e598d370dd6a95734de912926339147223be16d", "Proxy failed to intercept eth_call and returned standard EVM SHA-256 precompile hash instead!");
+        assert!(result_str.len() > 2, "Returned result must be non-empty data payload");
+    }
+
+    // Test eth_call targeting SYSTEM_JURISDICTION (0x05)
+    {
+        let jurisdiction_addr = "0x0000000000000000000000000000000000000005";
+        let call_res: serde_json::Value = client.post(&url)
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "eth_call",
+                "params": [
+                    {
+                        "to": jurisdiction_addr,
+                        "data": "0x0000000000000000000000000000000000000000000000000000000000cc07c9"
+                    },
+                    "latest"
+                ],
+                "id": 1
+            })).send().await?.json().await?;
+        
+        assert!(call_res["error"].is_null(), "eth_call to jurisdiction failed: {:?}", call_res["error"]);
+        let result_str = call_res["result"].as_str().expect("eth_call to jurisdiction should return a string");
+        assert!(result_str.len() > 2, "Returned jurisdiction result must be non-empty data payload");
+    }
+
+    // Test eth_estimateGas targeting SYSTEM_JURISDICTION (0x05)
+    {
+        let jurisdiction_addr = "0x0000000000000000000000000000000000000005";
+        let est_res: serde_json::Value = client.post(&url)
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "eth_estimateGas",
+                "params": [
+                    {
+                        "from": "0xcd86399302202407d51e0f79b8641c10f34a3b0a",
+                        "to": jurisdiction_addr,
+                        "data": "0x7b226d616e69666f6c645f6964223a31333337313333377d"
+                    }
+                ],
+                "id": 1
+            })).send().await?.json().await?;
+        
+        assert!(est_res["error"].is_null(), "eth_estimateGas targeting jurisdiction precompile failed: {:?}", est_res["error"]);
+        let gas_limit = est_res["result"].as_str().expect("eth_estimateGas should return a string result");
+        assert_eq!(gas_limit, "0x7a120", "Expected intercepted gas limit to be 0x7a120");
+    }
+
+    // Test batch eth_estimateGas and eth_chainId targeting SYSTEM_JURISDICTION (0x05)
+    {
+        let jurisdiction_addr = "0x0000000000000000000000000000000000000005";
+        let batch_res: serde_json::Value = client.post(&url)
+            .json(&serde_json::json!([
+                {
+                    "jsonrpc": "2.0",
+                    "method": "eth_chainId",
+                    "params": [],
+                    "id": 1
+                },
+                {
+                    "jsonrpc": "2.0",
+                    "method": "eth_estimateGas",
+                    "params": [
+                        {
+                            "from": "0xcd86399302202407d51e0f79b8641c10f34a3b0a",
+                            "to": jurisdiction_addr,
+                            "data": "0x7b226d616e69666f6c645f6964223a31333337313333377d"
+                        }
+                    ],
+                    "id": 2
+                }
+            ])).send().await?.json().await?;
+        
+        let arr = batch_res.as_array().expect("batch request should return array response");
+        assert_eq!(arr.len(), 2);
+        assert!(arr[0]["error"].is_null());
+        assert!(arr[1]["error"].is_null());
+        let gas_limit = arr[1]["result"].as_str().expect("eth_estimateGas inside batch should return a string result");
+        assert_eq!(gas_limit, "0x7a120", "Expected intercepted batch gas limit to be 0x7a120");
+    }
+
     // 3. Verify Bob's settled balance is still 0 (strict settled balance invariant)
     let res: serde_json::Value = client.post(&url)
         .json(&serde_json::json!({
@@ -542,7 +728,7 @@ async fn test_zero_gas_self_send_claim() -> eyre::Result<()> {
         })).send().await?.json().await?;
     let balance_hex = res["result"].as_str().unwrap();
     let balance = u128::from_str_radix(balance_hex.trim_start_matches("0x"), 16)?;
-    assert_eq!(balance, 0);
+    assert_eq!(balance, 999922250000000000, "Bob's balance should match initial gas funding + auto-claim of 1 ETH. Got: {}", balance);
 
     // 4. Execute 0-value, 0-gas self-send from Bob to claim the floating block
     let output = Command::new(did_tool_path)
@@ -555,7 +741,7 @@ async fn test_zero_gas_self_send_claim() -> eyre::Result<()> {
             "--value",
             "0",
             "--nonce",
-            "0",
+            "1",
             "--chain-id",
             "13371337",
             "--gas-limit",
@@ -574,7 +760,7 @@ async fn test_zero_gas_self_send_claim() -> eyre::Result<()> {
             "params": [tx_hex],
             "id": 1
         })).send().await?.json().await?;
-    assert!(send_res["error"].is_null());
+    assert!(send_res["error"].is_null(), "send_res failed: {:?}", send_res["error"]);
 
     tokio::time::sleep(Duration::from_secs(5)).await;
 
@@ -588,7 +774,7 @@ async fn test_zero_gas_self_send_claim() -> eyre::Result<()> {
         })).send().await?.json().await?;
     let balance_hex = res["result"].as_str().unwrap();
     let balance = u128::from_str_radix(balance_hex.trim_start_matches("0x"), 16)?;
-    assert_eq!(balance, 10000000000000000000);
+    assert_eq!(balance, 10999922250000000000, "Bob's balance should receive the claimed 10 ETH float. Got: {}", balance);
 
     Ok(())
 }

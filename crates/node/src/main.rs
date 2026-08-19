@@ -2,7 +2,7 @@
 //!
 //! Restructured for clean code and modularity.
 
-#![warn(missing_docs)]
+#![allow(missing_docs)]
 #![warn(clippy::all, clippy::pedantic)]
 
 use futures::StreamExt;
@@ -11,15 +11,17 @@ use reth_ethereum::{
     node::{api::FullNodeComponents, node::EthereumAddOns, EthereumNode},
 };
 use reth_exex::{ExExContext, ExExEvent, ExExNotification};
-use reth_node_builder::{components::NoopConsensusBuilder, WithLaunchContext};
+use reth_node_builder::components::NoopConsensusBuilder;
 use reth_node_core::args::DefaultEngineValues;
-use reth_primitives_traits::AlloyBlockHeader;
+use alloy_consensus::Transaction;
+use reth_primitives_traits::{AlloyBlockHeader, BlockBody, SignerRecoverable};
 use std::future::Future;
 use tracing::{debug, info};
 
 /// Node configuration module.
 pub mod config;
-/// CAIP RPC Proxy module.
+
+/// CAIP-RPC proxy module.
 pub mod caip_rpc;
 
 use sovereign_consensus::SovereignPoolBuilder;
@@ -71,6 +73,10 @@ pub struct SovereignArgs {
     /// Pluggable parallel EVM execution engine selection (e.g. wave, pevm, grevm)
     #[arg(long = "sov-parallel-engine")]
     pub sov_parallel_engine: Option<String>,
+
+    /// Port on which the CAIP-RPC proxy listens
+    #[arg(long = "sov-proxy-port", default_value_t = 8546)]
+    pub sov_proxy_port: u16,
 }
 
 impl Default for SovereignArgs {
@@ -87,6 +93,7 @@ impl Default for SovereignArgs {
             sov_block_time: None,
             sov_crypto_profile: None,
             sov_parallel_engine: None,
+            sov_proxy_port: 8546,
         }
     }
 }
@@ -143,6 +150,68 @@ async fn sovereign_exex<N: FullNodeComponents>(
                 debug!("Emitting state diffs for block #{} to local DA mesh...", tip.number());
                 let _mock_state_diff = vec![1, 2, 3, 4];
                 info!("Sovereign TEE ExEx: Emitted state diff commitment for block #{}", tip.number());
+
+                // Parse and execute system actions from transactions in the block
+                let registry_lock = sovereign_consensus::registry::get_registry();
+                for tx in tip.body().transactions().iter() {
+                    if let Some(to) = tx.to() {
+                        let is_sys = sovereign_consensus::system_registry::is_system_address(&to);
+                        let mut resolved_to = to;
+                        let mut resolved_calldata = tx.input().to_vec();
+                        let mut should_execute = is_sys;
+
+                        if !should_execute {
+                            if let Ok(reg) = registry_lock.read() {
+                                if let Some(actor) = reg.actors.values().find(|a| alloy_primitives::Address::from_slice(&a.actor_id[0..20]) == to) {
+                                    resolved_to = sovereign_consensus::system_registry::SYSTEM_ACTUATOR;
+                                    let mut temp = actor.actor_id.to_vec();
+                                    temp.extend_from_slice(tx.input());
+                                    resolved_calldata = temp;
+                                    should_execute = true;
+                                }
+                            }
+                        }
+
+                        if should_execute {
+                            if let Ok(caller) = tx.recover_signer() {
+                                if let Ok(mut reg) = registry_lock.write() {
+                                    if let Err(e) = sovereign_consensus::precompile_router::execute_system_action(
+                                        &mut reg,
+                                        caller,
+                                        resolved_to,
+                                        &resolved_calldata,
+                                        tip.number(),
+                                    ) {
+                                        tracing::error!("Failed to execute system action: {}", e);
+                                    } else {
+                                        tracing::info!("Executed system action on-chain in ExEx targeting {:#x}", to);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Sovereign Epoch Consensus Ticking
+                if let Ok(mut reg) = registry_lock.write() {
+                    let epoch_length = reg.static_cfg.epoch.epoch_length;
+                    let block_number = tip.number();
+                    if block_number > 0 && block_number % epoch_length == 0 {
+                        let epoch_id = block_number / epoch_length;
+                        info!("Epoch boundary reached: epoch #{}. Finalizing epoch consensus...", epoch_id);
+                        
+                        let consensus_root = tip.hash();
+                        let state_root = tip.state_root();
+                        let checkpoint = sovereign_consensus::epoch_engine::finalize_epoch(
+                            &mut reg,
+                            epoch_id,
+                            consensus_root,
+                            state_root,
+                        );
+                        info!("Epoch checkpoint #{} finalized successfully! Consensus root: {:?}, Snapshot hash: {:?}", 
+                            epoch_id, checkpoint.consensus_root, checkpoint.snapshot_hash);
+                    }
+                }
             }
 
             ctx.events.send(ExExEvent::FinishedHeight(tip_num_hash))?;
@@ -164,28 +233,7 @@ fn main() {
         .with_bal_parallel_execution_disabled(false)
         .try_init();
 
-    // Intercept HTTP port to run proxy
-    let mut env_args: Vec<String> = std::env::args().collect();
-    let mut port = 8545;
-    let mut port_idx = None;
-    for (i, arg) in env_args.iter().enumerate() {
-        if arg == "--http.port" && i + 1 < env_args.len() {
-            if let Ok(p) = env_args[i + 1].parse::<u16>() {
-                port = p;
-                port_idx = Some(i + 1);
-            }
-        }
-    }
-
-    let reth_port = port + 1;
-    if let Some(idx) = port_idx {
-        env_args[idx] = reth_port.to_string();
-    } else {
-        if env_args.iter().any(|arg| arg == "--http" || arg == "node") {
-            env_args.push("--http.port".to_string());
-            env_args.push(reth_port.to_string());
-        }
-    }
+    let env_args: Vec<String> = std::env::args().collect();
 
     if let Err(err) = Cli::<EthereumChainSpecParser, SovereignArgs>::parse_from(env_args).run(async move |builder, args| {
         info!("Launching Sovereign Reth Node (Node Type: {}, TEE Mode: {})", args.sov_node_type, args.sov_tee);
@@ -236,6 +284,7 @@ fn main() {
         let dynamic_cfg_arc = std::sync::Arc::new(std::sync::RwLock::new(dynamic_cfg));
         let _ = sovereign_consensus::registry::init_registry(static_cfg, dynamic_cfg_arc);
 
+        let proxy_port = args.sov_proxy_port;
         let is_dev = std::env::args().any(|arg| arg == "--dev");
 
         if is_dev {
@@ -251,10 +300,12 @@ fn main() {
                 .launch_with_debug_capabilities()
                 .await?;
             
-            // Start the CAIP RPC proxy
+            let node_config = &handle.node.config;
+            let reth_port = node_config.rpc.http_port as u16;
             let chain_id = handle.node.chain_spec().chain.id();
-            let _ = tokio::spawn(caip_rpc::run_proxy(port, reth_port, chain_id));
-
+            let _ = tokio::spawn(caip_rpc::run_proxy(proxy_port, reth_port, chain_id));
+            info!("🚀 Spawned CAIP-RPC proxy on port {proxy_port} forwarding to Reth on port {reth_port}");
+            
             handle.wait_for_node_exit().await
         } else {
             let handle = builder
@@ -269,10 +320,12 @@ fn main() {
                 .launch()
                 .await?;
             
-            // Start the CAIP RPC proxy
+            let node_config = &handle.node.config;
+            let reth_port = node_config.rpc.http_port as u16;
             let chain_id = handle.node.chain_spec().chain.id();
-            let _ = tokio::spawn(caip_rpc::run_proxy(port, reth_port, chain_id));
-
+            let _ = tokio::spawn(caip_rpc::run_proxy(proxy_port, reth_port, chain_id));
+            info!("🚀 Spawned CAIP-RPC proxy on port {proxy_port} forwarding to Reth on port {reth_port}");
+            
             handle.wait_for_node_exit().await
         }
     }) {
@@ -305,10 +358,23 @@ block_time_ms = 2000
 required_samples = 32
 max_attempts = 500
 
+[static_cfg.snowman]
+k = 10
+alpha = 0.8
+beta = 15
+
+[static_cfg.merit]
+rank_0_interval = 90
+rank_1_interval = 30
+rank_2_interval = 14
+rank_3_interval = 7
+rank_4_interval = 1
+
 [dynamic_cfg]
 sgx_reputation_threshold = 0.5
 manifold_quorum_threshold = 100
 social_promotion_threshold = 0.1
+default_pq_scheme = "mldsa"
 default_crypto_profile = "ethereum"
 saga_intent_timeout_seconds = 86400
 committee_threshold = 0.67

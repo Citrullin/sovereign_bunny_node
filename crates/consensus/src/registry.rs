@@ -18,6 +18,10 @@ pub struct AccountFrontier {
     pub paused_context: Option<Vec<u8>>,
     /// Size of the paused context snapshot.
     pub snapshot_size: usize,
+    /// Cached compliance vector snapshot refreshed at epoch boundaries.
+    pub cached_compliance: Option<crate::compliance_vector::ComplianceVector>,
+    /// Progressive merit rank tier of this account.
+    pub merit_rank: crate::jurisdiction::MeritRank,
 }
 
 /// Represents the type of a validator in the `DPoT` system.
@@ -38,6 +42,44 @@ pub struct RegisteredIdentity {
     pub doc: sovereign_identity::did::SovereignDidDocument,
     /// Unix timestamp when the identity was registered.
     pub registered_at: u64,
+}
+
+/// Details of a cross-chain smart contract event observer subroutine.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CrossChainObserverSubroutine {
+    pub subroutine_id: B256,
+    pub foreign_chain_id: u64,
+    pub contract_address: Address,
+    pub event_signature: B256,
+    pub last_observed_block: u64,
+}
+
+/// Details of a pending cross-chain Saga Intent escrow lock.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct IntentEscrow {
+    /// Unique intent identifier
+    pub intent_id: B256,
+    /// Address of target account thread
+    pub target_account: Address,
+    /// Locked escrow amount
+    pub amount: alloy_primitives::U256,
+    /// Expiry epoch height
+    pub expire_epoch: u64,
+}
+
+/// Consensus checkpoint finalized at the boundary of a global epoch.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct EpochCheckpoint {
+    /// ID of the epoch that was finalized
+    pub epoch_id: u64,
+    /// Final consensus root (merit-weighted BFT checkpoint)
+    pub consensus_root: B256,
+    /// State root of the Verkle tree at this epoch boundary
+    pub state_root: B256,
+    /// Hash of the Chandy-Lamport distributed snapshot channel state
+    pub snapshot_hash: B256,
+    /// Aggregated validator signatures supporting the checkpoint
+    pub validator_signatures: Vec<Vec<u8>>,
 }
 
 /// `DPoT` Validator Directory with `TinyMeritRank` reputation.
@@ -70,6 +112,22 @@ pub struct ValidatorRegistry {
     pub account_frontiers: HashMap<Address, AccountFrontier>,
     /// Global registry of all submitted block-lattice blocks.
     pub lattice_blocks: HashMap<B256, crate::stateless::LatticeBlock>,
+    /// Post-quantum public keys registered per Address.
+    pub pq_keys: HashMap<Address, Vec<u8>>,
+    /// Key security tier assigned per Address.
+    pub did_key_tier: HashMap<Address, crate::pq_registry::KeyTier>,
+    /// Active intent escrow locks.
+    pub intent_escrows: HashMap<B256, IntentEscrow>,
+    /// Cross-Manifold Saga Actors
+    pub actors: HashMap<B256, crate::actor::CrossManifoldActor>,
+    /// Inboxes for Cross-Manifold Saga Actors
+    pub actor_inboxes: HashMap<B256, Vec<crate::based_mesh::CrossManifoldMessage>>,
+    /// Latest epoch checkpoint finalized.
+    pub latest_checkpoint: Option<EpochCheckpoint>,
+    /// Active jurisdiction policies per manifold.
+    pub jurisdiction_vectors: HashMap<u64, crate::jurisdiction::JurisdictionVector>,
+    /// Active cross-chain observer subroutines.
+    pub cross_chain_subroutines: HashMap<B256, CrossChainObserverSubroutine>,
 }
 
 impl Default for ValidatorRegistry {
@@ -103,7 +161,25 @@ impl ValidatorRegistry {
             chain_id: 1337,
             account_frontiers: HashMap::new(),
             lattice_blocks: HashMap::new(),
+            pq_keys: HashMap::new(),
+            did_key_tier: HashMap::new(),
+            intent_escrows: HashMap::new(),
+            actors: HashMap::new(),
+            actor_inboxes: HashMap::new(),
+            latest_checkpoint: None,
+            jurisdiction_vectors: HashMap::new(),
+            cross_chain_subroutines: HashMap::new(),
         }
+    }
+
+    /// Registers that a validator's identity DID supports/has access to an external chain.
+    pub fn register_validator_supported_manifold(&mut self, did: String, manifold_id: u64) {
+        self.supported_manifolds.entry(did).or_default().insert(manifold_id);
+    }
+
+    /// Registers a cross-chain smart contract observer subroutine.
+    pub fn register_cross_chain_observer_subroutine(&mut self, sub: CrossChainObserverSubroutine) {
+        self.cross_chain_subroutines.insert(sub.subroutine_id, sub);
     }
 
     /// Returns the registered DID of an address.
@@ -120,6 +196,8 @@ impl ValidatorRegistry {
             locked_at: 0,
             paused_context: None,
             snapshot_size: 0,
+            cached_compliance: None,
+            merit_rank: crate::jurisdiction::MeritRank::Rank0,
         }).clone()
     }
 
@@ -441,6 +519,13 @@ impl ValidatorRegistry {
         });
 
         Ok(addr)
+    }
+
+    /// Punishes a validator for proposing or voting on an invalid state root/proof.
+    pub fn penalize_validator_reputation(&mut self, did: &str, penalty: f64) {
+        if let Some(rep) = self.reputation.get_mut(did) {
+            *rep = (*rep - penalty).max(0.0);
+        }
     }
 
     /// Mock validator insertion helper for testing.

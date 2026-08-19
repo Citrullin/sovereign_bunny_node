@@ -143,6 +143,25 @@ case $TARGET in
     ;;
 esac
 
+echo "=== Step 3b: Compiling WebAssembly Wallet ==="
+if command -v wasm-pack >/dev/null 2>&1; then
+  cd wallet
+  # Clear RUSTFLAGS temporarily to avoid target-incompatible linker flags from host build
+  RUSTFLAGS="" wasm-pack build --target no-modules --out-dir www/pkg
+  echo "Inlining HTML/CSS/JS frontend assets into wallet/app..."
+  python3 build.py
+  cd ..
+else
+  echo "⚠️ wasm-pack not found. Skipping Rust WASM wallet compilation."
+  echo "If you want to compile the wallet, please install wasm-pack (curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh)."
+  # Still try to run build.py to inline existing pkg assets
+  if [ -f "wallet/build.py" ]; then
+    cd wallet
+    python3 build.py || true
+    cd ..
+  fi
+fi
+
 echo "=== Step 4: Re-initializing Database ==="
 rm -rf db
 if [ "$TARGET" = "host" ] || [ "$TARGET" = "x86" ] || [ "$TARGET" = "ALL" ]; then

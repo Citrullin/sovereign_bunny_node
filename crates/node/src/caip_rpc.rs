@@ -3,7 +3,6 @@ use alloy_primitives::{Address, B256, U256};
 use alloy_rlp::{Decodable, Encodable};
 use alloy_signer_local::PrivateKeySigner;
 use alloy_network::TxSigner;
-use k256::ecdsa::signature::hazmat::PrehashVerifier;
 use reth_primitives_traits::SignerRecoverable;
 use serde_json::json;
 use sovereign_consensus::registry::get_registry;
@@ -11,7 +10,7 @@ use std::collections::HashMap;
 use std::sync::{OnceLock, RwLock};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 /// A native token transfer record indexed in the 48-hour hot Verkle witness cache.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -323,8 +322,9 @@ pub async fn run_proxy(port: u16, reth_port: u16, chain_id: u64) -> Result<(), e
                 }
 
                 let s = String::from_utf8_lossy(&buffer);
-                let Some(pos) = s.find("\r\n\r\n") else { return };
-                let header_len = pos + 4;
+                let pos = s.find("\r\n\r\n").or_else(|| s.find("\n\n"));
+                let Some(pos) = pos else { continue };
+                let header_len = if s.contains("\r\n\r\n") { pos + 4 } else { pos + 2 };
 
                 let mut content_length: usize = 0;
                 for line in s[..header_len].lines() {
@@ -354,9 +354,9 @@ pub async fn run_proxy(port: u16, reth_port: u16, chain_id: u64) -> Result<(), e
                 buffer.drain(0..total_expected);
 
                 // 🔍 FULL WIRE INSPECTION LOGGING FOR STATELESS ZKEVM DEBUGGING
-                debug!("==================================================================");
-                debug!("🌐 INCOMING STATELESS ZKEVM PROXY REQUEST:\n{request_str}");
-                debug!("==================================================================");
+                info!("==================================================================");
+                info!("🌐 INCOMING STATELESS ZKEVM PROXY REQUEST:\n{request_str}");
+                info!("==================================================================");
 
                 if request_str.starts_with("OPTIONS") {
                     let _ = client_stream.write_all(
@@ -365,10 +365,282 @@ pub async fn run_proxy(port: u16, reth_port: u16, chain_id: u64) -> Result<(), e
                     continue;
                 }
 
-                let body_start = request_str.find("\r\n\r\n").map(|i| i + 4).unwrap_or(0);
+                let body_start = request_str.find("\r\n\r\n").map(|i| i + 4)
+                    .or_else(|| request_str.find("\n\n").map(|i| i + 2))
+                    .unwrap_or(0);
                 let body_json: serde_json::Value = serde_json::from_str(&request_str[body_start..])
                     .unwrap_or(serde_json::Value::Null);
+                if body_json.is_array() {
+                    let reth_res = forward_to_reth_http(reth_port, &body_json).await.unwrap_or(json!([]));
+                    let mut final_batch = if reth_res.is_array() {
+                        reth_res.as_array().unwrap().clone()
+                    } else {
+                        vec![reth_res; body_json.as_array().unwrap().len()]
+                    };
 
+                    for (i, req) in body_json.as_array().unwrap().iter().enumerate() {
+                        let method = req["method"].as_str().unwrap_or("");
+                        let id = &req["id"];
+                        
+                        if method == "eth_estimateGas" {
+                            if let Some(est_params) = req["params"].get(0) {
+                                let from = est_params["from"].as_str().unwrap_or("");
+                                let to_str = est_params["to"].as_str().unwrap_or("");
+                                let data = est_params["data"].as_str().or_else(|| est_params["input"].as_str()).unwrap_or("");
+                                
+                                let is_sys = if let Ok(to_addr) = to_str.parse::<Address>() {
+                                    sovereign_consensus::system_registry::is_system_address(&to_addr)
+                                } else {
+                                    false
+                                };
+
+                                if is_sys || (!from.is_empty() && from.eq_ignore_ascii_case(to_str) && (data.is_empty() || data == "0x")) {
+                                    final_batch[i] = json!({
+                                        "jsonrpc": "2.0",
+                                        "result": "0x7a120",
+                                        "id": id
+                                    });
+                                }
+                            }
+                        }
+
+                        if method == "eth_call" {
+                            let call_params = &req["params"][0];
+                            let to_str = call_params["to"].as_str().unwrap_or("");
+                            let data_str = call_params["data"].as_str().unwrap_or("0x");
+                            if let Ok(to_addr) = to_str.parse::<Address>() {
+                                let is_sys = sovereign_consensus::system_registry::is_system_address(&to_addr);
+                                let is_actor;
+                                let mut target_precompile = to_addr;
+                                let mut resolved_calldata = alloy_primitives::hex::decode(data_str.trim_start_matches("0x")).unwrap_or_default();
+
+                                {
+                                    let reg = get_registry().read().unwrap();
+                                    is_actor = reg.actors.values().any(|actor| {
+                                        Address::from_slice(&actor.actor_id[0..20]) == to_addr
+                                    });
+                                    if is_actor {
+                                        target_precompile = sovereign_consensus::system_registry::SYSTEM_ACTUATOR;
+                                        if let Some(actor) = reg.actors.values().find(|a| Address::from_slice(&a.actor_id[0..20]) == to_addr) {
+                                            let mut prefixed = actor.actor_id.to_vec();
+                                            prefixed.extend_from_slice(&resolved_calldata);
+                                            resolved_calldata = prefixed;
+                                        }
+                                    }
+                                }
+
+                                if is_sys || is_actor {
+                                    let mut hex_result_opt = None;
+                                    if let Ok(reg) = get_registry().read() {
+                                        if target_precompile == sovereign_consensus::system_registry::SYSTEM_ACCOUNT_HEIGHT {
+                                            if resolved_calldata.len() >= 20 {
+                                                let target_account = if resolved_calldata.len() >= 32 {
+                                                    Address::from_slice(&resolved_calldata[12..32])
+                                                } else {
+                                                    Address::from_slice(&resolved_calldata[0..20])
+                                                };
+                                                let mut sequence = 0u64;
+                                                let mut latest_hash = B256::ZERO;
+                                                let mut merit_rank = 0u64;
+                                                let mut q1 = 0u64;
+                                                let mut q2 = 0u64;
+                                                if let Some(frontier) = reg.account_frontiers.get(&target_account) {
+                                                    sequence = frontier.sequence;
+                                                    latest_hash = frontier.latest_hash;
+                                                    merit_rank = frontier.merit_rank as u64;
+                                                    if let Some(ref compliance) = frontier.cached_compliance {
+                                                        q1 = compliance.0[0];
+                                                        q2 = compliance.0[1];
+                                                    }
+                                                }
+                                                let tier = reg.did_key_tier.get(&target_account).copied().unwrap_or(sovereign_consensus::pq_registry::KeyTier::Classical);
+                                                let key_tier = match tier {
+                                                    sovereign_consensus::pq_registry::KeyTier::Classical => 0u64,
+                                                    sovereign_consensus::pq_registry::KeyTier::QuantumReady => 1u64,
+                                                    sovereign_consensus::pq_registry::KeyTier::QuantumOnly => 2u64,
+                                                };
+                                                let mut out = vec![0u8; 192];
+                                                out[24..32].copy_from_slice(&sequence.to_be_bytes());
+                                                out[32..64].copy_from_slice(latest_hash.as_slice());
+                                                out[88..96].copy_from_slice(&merit_rank.to_be_bytes());
+                                                out[120..128].copy_from_slice(&q1.to_be_bytes());
+                                                out[152..160].copy_from_slice(&q2.to_be_bytes());
+                                                out[184..192].copy_from_slice(&key_tier.to_be_bytes());
+                                                hex_result_opt = Some(format!("0x{}", alloy_primitives::hex::encode(&out)));
+                                            }
+                                        } else if target_precompile == sovereign_consensus::system_registry::SYSTEM_DID_REGISTRY {
+                                            let mut resolved_did = None;
+                                            let is_addr = resolved_calldata.len() == 20 || resolved_calldata.len() == 32;
+                                            if is_addr {
+                                                let addr = if resolved_calldata.len() == 32 {
+                                                    Address::from_slice(&resolved_calldata[12..32])
+                                                } else {
+                                                    Address::from_slice(&resolved_calldata[0..20])
+                                                };
+                                                if let Some(did) = reg.get_did_by_address(&addr) {
+                                                    resolved_did = Some(did);
+                                                }
+                                            } else if let Ok(did_str) = String::from_utf8(resolved_calldata.clone()) {
+                                                let normalized = sovereign_consensus::registry::ValidatorRegistry::normalize_query_did(&did_str);
+                                                if reg.is_did_registered(&normalized) {
+                                                    resolved_did = Some(normalized);
+                                                } else if let Some(ident) = reg.find_identity_by_any_key(&normalized) {
+                                                    resolved_did = Some(ident.did.clone());
+                                                }
+                                            }
+                                            if let Some(ref did) = resolved_did {
+                                                let address = reg.get_address_by_did(did).map(|a| format!("{a:#x}"));
+                                                let mut keys = serde_json::Map::new();
+                                                if let Some(ident) = reg.identities.get(did) {
+                                                     let doc = &ident.doc;
+                                                     let encode_multibase = |prefix: &[u8], key: &[u8]| -> String {
+                                                         let mut combined = prefix.to_vec();
+                                                         combined.extend_from_slice(key);
+                                                         format!("z{}", bs58::encode(&combined).into_string())
+                                                     };
+                                                     keys.insert("secp256k1".to_string(), json!(encode_multibase(&[0xe7, 0x01], &doc.secp256k1_pubkey)));
+                                                     keys.insert("ed25519".to_string(), json!(encode_multibase(&[0xed, 0x01], &doc.ed25519_pubkey)));
+                                                     keys.insert("bls12381".to_string(), json!(encode_multibase(&[0xea, 0x01], &doc.bls_pubkey)));
+                                                     keys.insert("mldsa65".to_string(), json!(encode_multibase(&[0x93, 0x01], &doc.ml_dsa_pubkey)));
+                                                     keys.insert("slhdsa".to_string(), json!(encode_multibase(&[0x94, 0x01], &doc.slh_dsa_pubkey)));
+                                                     keys.insert("falcon".to_string(), json!(encode_multibase(&[0x92, 0x01], &doc.falcon_pubkey)));
+                                                     keys.insert("xmss".to_string(), json!(encode_multibase(&[0x95, 0x01], &doc.xmss_pubkey)));
+                                                     let response_obj = json!({
+                                                         "registered": true,
+                                                         "did": resolved_did,
+                                                         "address": address,
+                                                         "keys": if keys.is_empty() { serde_json::Value::Null } else { serde_json::Value::Object(keys) }
+                                                     });
+                                                     let response_str = serde_json::to_string(&response_obj).unwrap_or_default();
+                                                     let str_bytes = response_str.as_bytes();
+                                                     let mut out = vec![0u8; 32];
+                                                     out[31] = 32;
+                                                     let mut len_bytes = [0u8; 32];
+                                                     len_bytes[24..32].copy_from_slice(&(str_bytes.len() as u64).to_be_bytes());
+                                                     out.extend_from_slice(&len_bytes);
+                                                     out.extend_from_slice(str_bytes);
+                                                     let remainder = out.len() % 32;
+                                                     if remainder > 0 {
+                                                         out.extend(vec![0u8; 32 - remainder]);
+                                                     }
+                                                     hex_result_opt = Some(format!("0x{}", alloy_primitives::hex::encode(&out)));
+                                                }
+                                            }
+                                        } else if target_precompile == sovereign_consensus::system_registry::SYSTEM_RECEIVE_HOOK {
+                                            if resolved_calldata.len() >= 20 {
+                                                let target_addr = if resolved_calldata.len() >= 32 {
+                                                    Address::from_slice(&resolved_calldata[12..32])
+                                                } else {
+                                                    Address::from_slice(&resolved_calldata[0..20])
+                                                };
+                                                let mut sends = Vec::new();
+                                                for (hash, block) in &reg.lattice_blocks {
+                                                    if let sovereign_consensus::stateless::LatticePayload::Send { recipient, amount } = &block.payload {
+                                                        if *recipient == target_addr {
+                                                            sends.push((*hash, block, amount));
+                                                        }
+                                                    }
+                                                }
+                                                let mut claimed = std::collections::HashSet::new();
+                                                for block in reg.lattice_blocks.values() {
+                                                    if let sovereign_consensus::stateless::LatticePayload::Receive { send_block_hash, .. } = &block.payload {
+                                                        claimed.insert(*send_block_hash);
+                                                    }
+                                                }
+                                                let mut pending = Vec::new();
+                                                for (send_hash, block, amount) in sends {
+                                                    if !claimed.contains(&send_hash) {
+                                                        pending.push(json!({
+                                                            "sendBlockHash": format!("{:#x}", send_hash),
+                                                            "sender": format!("{:#x}", block.account),
+                                                            "amount": amount.to_string(),
+                                                        }));
+                                                    }
+                                                }
+                                                let response_str = serde_json::to_string(&pending).unwrap_or_default();
+                                                let str_bytes = response_str.as_bytes();
+                                                let mut out = vec![0u8; 32];
+                                                out[31] = 32;
+                                                let mut len_bytes = [0u8; 32];
+                                                len_bytes[24..32].copy_from_slice(&(str_bytes.len() as u64).to_be_bytes());
+                                                out.extend_from_slice(&len_bytes);
+                                                out.extend_from_slice(str_bytes);
+                                                let remainder = out.len() % 32;
+                                                if remainder > 0 {
+                                                    out.extend(vec![0u8; 32 - remainder]);
+                                                }
+                                                hex_result_opt = Some(format!("0x{}", alloy_primitives::hex::encode(&out)));
+                                            }
+                                        } else if target_precompile == sovereign_consensus::system_registry::SYSTEM_JURISDICTION {
+                                            let manifold_id = if resolved_calldata.len() >= 8 {
+                                                u64::from_be_bytes(resolved_calldata[0..8].try_into().unwrap_or([0u8; 8]))
+                                            } else {
+                                                13371337u64
+                                            };
+                                            let vector = reg.jurisdiction_vectors.get(&manifold_id).cloned().unwrap_or_else(|| {
+                                                let mut bit_registry = HashMap::new();
+                                                bit_registry.insert((1, 0), "KYC/AML Verified".to_string());
+                                                bit_registry.insert((1, 1), "Sanctioned Entity".to_string());
+                                                bit_registry.insert((1, 2), "PEP Flagged".to_string());
+                                                bit_registry.insert((2, 0), "Accredited Investor".to_string());
+                                                bit_registry.insert((2, 1), "Institutional".to_string());
+                                                bit_registry.insert((2, 2), "Region: United States".to_string());
+                                                bit_registry.insert((2, 3), "Region: European Union".to_string());
+                                                bit_registry.insert((2, 4), "Region: Switzerland".to_string());
+                                                bit_registry.insert((2, 5), "Region: Cayman Islands".to_string());
+                                                sovereign_consensus::jurisdiction::JurisdictionVector {
+                                                    manifold_id,
+                                                    active_q1_mask: 0,
+                                                    required_q2_mask: 0,
+                                                    velocity_limit: None,
+                                                    appointed_enforcer_did: None,
+                                                    epoch_established: 1,
+                                                    compliance_root: [0; 32],
+                                                    bit_registry,
+                                                }
+                                            });
+                                            let mut serialized_bit_registry = serde_json::Map::new();
+                                            for ((q, b), label) in &vector.bit_registry {
+                                                serialized_bit_registry.insert(format!("{}_{}", q, b), json!(label));
+                                            }
+                                            let response_obj = json!({
+                                                "manifoldId": vector.manifold_id,
+                                                "activeQ1Mask": vector.active_q1_mask.to_string(),
+                                                "requiredQ2Mask": vector.required_q2_mask.to_string(),
+                                                "epochEstablished": vector.epoch_established,
+                                                "bitRegistry": serialized_bit_registry
+                                            });
+                                            let response_str = serde_json::to_string(&response_obj).unwrap_or_default();
+                                            let str_bytes = response_str.as_bytes();
+                                            let mut out = vec![0u8; 32];
+                                            out[31] = 32;
+                                            let mut len_bytes = [0u8; 32];
+                                            len_bytes[24..32].copy_from_slice(&(str_bytes.len() as u64).to_be_bytes());
+                                            out.extend_from_slice(&len_bytes);
+                                            out.extend_from_slice(str_bytes);
+                                            let remainder = out.len() % 32;
+                                            if remainder > 0 {
+                                                out.extend(vec![0u8; 32 - remainder]);
+                                            }
+                                            hex_result_opt = Some(format!("0x{}", alloy_primitives::hex::encode(&out)));
+                                        }
+                                    }
+
+                                    if let Some(hex_result) = hex_result_opt {
+                                        final_batch[i] = json!({
+                                            "jsonrpc": "2.0",
+                                            "result": hex_result,
+                                            "id": id
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    write_json(&mut client_stream, &json!(final_batch).to_string()).await;
+                    continue;
+                }
                 let method = body_json["method"].as_str().unwrap_or("");
                 let id = body_json["id"].clone();
 
@@ -376,67 +648,7 @@ pub async fn run_proxy(port: u16, reth_port: u16, chain_id: u64) -> Result<(), e
 
                 sync_hot_storage(reth_port).await;
 
-                if method == "sovereign_registerDid" {
-                    let did_uri = body_json["params"][0].as_str().unwrap_or("");
-                    let nonce_val = body_json["params"].get(1).and_then(|v| v.as_u64()).unwrap_or(0);
-                    let sig_hex = body_json["params"].get(2).and_then(|v| v.as_str()).unwrap_or("");
 
-                    // 1. Resolve DID to get public key & EVM address
-                    let doc = match sovereign_identity::did::SovereignDidDocument::from_did_string(did_uri) {
-                        Some(d) => d,
-                        None => {
-                            send_error(&mut client_stream, &id, -32603, "Invalid DID URI string or multihash mismatch").await;
-                            continue;
-                        }
-                    };
-
-                    // 2. Validate nonce freshness (within 5 minutes)
-                    let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
-                    let diff = if now_ms > nonce_val { now_ms - nonce_val } else { nonce_val - now_ms };
-                    if diff > 300_000 {
-                        send_error(&mut client_stream, &id, -32002, "Registration error: Nonce timestamp is expired or out of sync").await;
-                        continue;
-                    }
-
-                    // 3. Verify signature using secp256k1 public key of the DID document
-                    let message = format!("registerDid:{did_uri}:{nonce_val}");
-                    let digest = alloy_primitives::keccak256(message.as_bytes());
-                    
-                    let clean_sig = sig_hex.strip_prefix("0x").unwrap_or(sig_hex);
-                    let mut sig_bytes = match alloy_primitives::hex::decode(clean_sig) {
-                        Ok(b) => b,
-                        Err(_) => {
-                            send_error(&mut client_stream, &id, -32003, "Registration error: Invalid signature hex").await;
-                            continue;
-                        }
-                    };
-                    if sig_bytes.len() == 65 {
-                        sig_bytes.truncate(64);
-                    }
-
-                    let verifying_key = k256::ecdsa::VerifyingKey::from_sec1_bytes(&doc.secp256k1_pubkey);
-                    let sig = k256::ecdsa::Signature::from_slice(&sig_bytes);
-
-                    let verified = match (verifying_key, sig) {
-                        (Ok(vk), Ok(s)) => vk.verify_prehash(&digest[..], &s).map_err(|_| "Signature mismatch"),
-                        _ => Err("Invalid key or signature format"),
-                    };
-
-                    if verified.is_err() {
-                        send_error(&mut client_stream, &id, -32003, "Registration error: Signature verification failed. Key ownership proof mismatch.").await;
-                        continue;
-                    }
-
-                    let reg_res = {
-                        let mut registry = get_registry().write().unwrap();
-                        registry.register_user_did(did_uri.to_string())
-                    };
-                    match reg_res {
-                        Ok(addr) => send_result(&mut client_stream, &id, json!({ "status": "success", "address": format!("{addr:?}") })).await,
-                        Err(e) => send_error(&mut client_stream, &id, -32603, &format!("{e}")).await,
-                    }
-                    continue;
-                }
 
                 if method == "wallet_requestPermissions" {
                     let request_did = extract_header(&request_str, "x-sovereign-did");
@@ -459,167 +671,11 @@ pub async fn run_proxy(port: u16, reth_port: u16, chain_id: u64) -> Result<(), e
                     continue;
                 }
 
-                if method == "sovereign_receive" {
-                    let recipient_addr = body_json["params"][0].as_str().unwrap_or("").parse::<Address>().unwrap_or_default();
-                    let send_block_hash = body_json["params"][1].as_str().unwrap_or("").parse::<B256>().unwrap_or_default();
-                    let proof_hex = body_json["params"][2].as_str().unwrap_or("");
-                    let proof_bytes = alloy_primitives::hex::decode(proof_hex).unwrap_or_default();
 
-                    let receive_header = sovereign_consensus::stateless::ReceiveBlockHeader {
-                        send_block_hash,
-                        verkle_witness_proof: proof_bytes.clone(),
-                    };
 
-                    let block_req = json!({ "jsonrpc": "2.0", "method": "eth_getBlockByNumber", "params": ["latest", false], "id": 9999 });
-                    let mut root = B256::repeat_byte(0xaa);
-                    if let Ok(res) = forward_to_reth_http(reth_port, &block_req).await {
-                        if let Some(r_str) = res["result"]["stateRoot"].as_str() {
-                            if let Ok(r) = r_str.parse::<B256>() {
-                                root = r;
-                            }
-                        }
-                    }
-                    let verified = sovereign_consensus::stateless::verify_receive_stateless(&receive_header, root);
 
-                    if !verified {
-                        send_error(&mut client_stream, &id, -32003, "Receive verification failed: Invalid Verkle proof").await;
-                        continue;
-                    }
 
-                    {
-                        let mut reg = get_registry().write().unwrap();
-                        let mut frontier = reg.get_or_create_frontier(recipient_addr);
-                        let next_seq = frontier.sequence + 1;
-                        let prev_hash = frontier.latest_hash;
 
-                        let receive_block = sovereign_consensus::stateless::LatticeBlock {
-                            account: recipient_addr,
-                            previous_hash: prev_hash,
-                            sequence: next_seq,
-                            payload: sovereign_consensus::stateless::LatticePayload::Receive {
-                                send_block_hash,
-                                amount: U256::from(0),
-                            },
-                            signature: vec![],
-                            static_witnesses: vec![],
-                        };
-                        let receive_block_hash = alloy_primitives::keccak256(&scale::Encode::encode(&receive_block));
-                        
-                        frontier.latest_hash = receive_block_hash;
-                        frontier.sequence = next_seq;
-                        reg.update_frontier(recipient_addr, frontier);
-                        reg.lattice_blocks.insert(receive_block_hash, receive_block);
-                    }
-
-                    send_result(&mut client_stream, &id, json!({ "status": "success", "message": "Receive block registered stateless" })).await;
-                    continue;
-                }
-
-                if method == "sovereign_getPendingInbox" {
-                    let target_addr = body_json["params"][0].as_str().unwrap_or("").parse::<Address>().unwrap_or_default();
-                    let mut inbox = Vec::new();
-                    
-                    if let Ok(reg) = get_registry().read() {
-                        let mut claimed = std::collections::HashSet::new();
-                        for block in reg.lattice_blocks.values() {
-                            if let sovereign_consensus::stateless::LatticePayload::Receive { send_block_hash, .. } = &block.payload {
-                                claimed.insert(*send_block_hash);
-                            }
-                        }
-                        
-                        for (hash, block) in &reg.lattice_blocks {
-                            if let sovereign_consensus::stateless::LatticePayload::Send { recipient, amount } = &block.payload {
-                                if *recipient == target_addr && !claimed.contains(hash) {
-                                    inbox.push(json!({
-                                        "sendBlockHash": format!("{:#x}", hash),
-                                        "amount": amount.to_string(),
-                                        "nonce": block.sequence,
-                                        "from": format!("{:#x}", block.account),
-                                        "timestamp": now_secs(),
-                                        "expiration": now_secs() + 2_592_000
-                                    }));
-                                }
-                            }
-                        }
-                    }
-                    send_result(&mut client_stream, &id, json!(inbox)).await;
-                    continue;
-                }
-
-                if method == "sovereign_reclaimSend" {
-                    let sender_addr = body_json["params"][0].as_str().unwrap_or("").parse::<Address>().unwrap_or_default();
-                    let send_block_hash = body_json["params"][1].as_str().unwrap_or("").parse::<B256>().unwrap_or_default();
-                    let current_block_num = body_json["params"].get(2).and_then(|v| v.as_u64()).unwrap_or(0);
-
-                    // verify reclaim signature
-                    let sig_hex = body_json["params"].get(3).and_then(|v| v.as_str()).unwrap_or("");
-                    let clean_sig = sig_hex.strip_prefix("0x").unwrap_or(sig_hex);
-                    let sig_bytes = alloy_primitives::hex::decode(clean_sig).unwrap_or_default();
-                    
-                    let mut verified_sig = false;
-                    if let Ok(reg) = get_registry().read() {
-                        if let Some(did) = reg.get_did_by_address(&sender_addr) {
-                            if let Some(ident) = reg.identities.get(&did) {
-                                let verifying_key = k256::ecdsa::VerifyingKey::from_sec1_bytes(&ident.doc.secp256k1_pubkey);
-                                let sig = k256::ecdsa::Signature::from_slice(&sig_bytes);
-                                let message = format!("reclaimSend:{send_block_hash:#x}:{current_block_num}");
-                                let digest = alloy_primitives::keccak256(message.as_bytes());
-                                if let (Ok(vk), Ok(s)) = (verifying_key, sig) {
-                                    use k256::ecdsa::signature::hazmat::PrehashVerifier as _;
-                                    if vk.verify_prehash(&digest[..], &s).is_ok() {
-                                        verified_sig = true;
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    if !verified_sig {
-                        send_error(&mut client_stream, &id, -32003, "Reclaim failed: Invalid sender signature").await;
-                        continue;
-                    }
-
-                    let mut is_claimed = false;
-                    if let Ok(reg) = get_registry().read() {
-                        for block in reg.lattice_blocks.values() {
-                            if let sovereign_consensus::stateless::LatticePayload::Receive { send_block_hash: sh, .. } = &block.payload {
-                                if *sh == send_block_hash {
-                                    is_claimed = true;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-
-                    if is_claimed {
-                        send_error(&mut client_stream, &id, -32003, "Reclaim failed: Send transaction has already been claimed").await;
-                        continue;
-                    }
-
-                    let mut send_block_num = 0;
-                    {
-                        let state = get_state().read().unwrap();
-                        if let Some(list) = state.native_history.get(&sender_addr) {
-                            if let Some(rec) = list.iter().find(|r| r.tx_hash == send_block_hash) {
-                                send_block_num = u64::from_str_radix(rec.block_number.trim_start_matches("0x"), 16).unwrap_or(0);
-                            }
-                        }
-                    }
-
-                    let verified = sovereign_consensus::stateless::verify_reclaim_send(send_block_num, current_block_num, 10);
-                    if !verified {
-                        send_error(&mut client_stream, &id, -32003, &format!("Reclaim failed: Send transaction has not reached timeout block age (Send Block: {send_block_num}, Current: {current_block_num})")).await;
-                        continue;
-                    }
-
-                    {
-                        let mut reg = get_registry().write().unwrap();
-                        reg.lattice_blocks.remove(&send_block_hash);
-                    }
-
-                    send_result(&mut client_stream, &id, json!({ "status": "success", "message": "Send block reclaimed successfully" })).await;
-                    continue;
-                }
 
                 if method == "eth_getBalance" {
                     let address = body_json["params"][0].as_str().unwrap_or("").parse::<Address>().unwrap_or_default();
@@ -645,7 +701,9 @@ pub async fn run_proxy(port: u16, reth_port: u16, chain_id: u64) -> Result<(), e
                             for (hash, block) in &reg.lattice_blocks {
                                 if let sovereign_consensus::stateless::LatticePayload::Send { recipient, amount } = &block.payload {
                                     if *recipient == address {
-                                        let is_evm_tx = block.signature.is_empty();
+                                        let is_evm_tx = block.signature.is_empty() 
+                                            || block.signature == vec![0x00]
+                                            || (block.signature.len() > 0 && (block.signature[0] == 248 || block.signature[0] == 249));
                                         if is_evm_tx {
                                             // Standard EVM tx: subtract if unclaimed (Rule 6)
                                             if !claimed.contains(hash) {
@@ -675,6 +733,367 @@ pub async fn run_proxy(port: u16, reth_port: u16, chain_id: u64) -> Result<(), e
                     continue;
                 }
 
+                if method == "eth_call" {
+                    let call_params = &body_json["params"][0];
+                    let to_str = call_params["to"].as_str().unwrap_or("");
+                    let data_str = call_params["data"].as_str().unwrap_or("0x");
+                    if let Ok(to_addr) = to_str.parse::<Address>() {
+                        let data_bytes = alloy_primitives::hex::decode(data_str.trim_start_matches("0x")).unwrap_or_default();
+                        
+                        let is_sys = sovereign_consensus::system_registry::is_system_address(&to_addr);
+                        info!("🔍 PROXY ETH_CALL: to={:?} is_sys={} data_len={}", to_addr, is_sys, data_bytes.len());
+                        
+                        // Execute registry read operations in an inner scope so the lock guard is dropped before the await call!
+                        let hex_result_opt = {
+                            let reg = get_registry().read().unwrap();
+                            let is_actor = reg.actors.values().any(|actor| {
+                                let derived = Address::from_slice(&actor.actor_id[0..20]);
+                                derived == to_addr
+                            });
+                            
+                            if is_sys || is_actor {
+                                let target_precompile = if is_actor {
+                                    sovereign_consensus::system_registry::SYSTEM_ACTUATOR
+                                } else {
+                                    to_addr
+                                };
+                                info!("⚙️ INTERCEPTING SYSTEM CALL: target_precompile={:?}", target_precompile);
+                                
+                                let mut resolved_calldata = data_bytes.clone();
+                                if is_actor {
+                                    if let Some(actor) = reg.actors.values().find(|a| Address::from_slice(&a.actor_id[0..20]) == to_addr) {
+                                        let mut prefixed = actor.actor_id.to_vec();
+                                        prefixed.extend_from_slice(&data_bytes);
+                                        resolved_calldata = prefixed;
+                                    }
+                                }
+                                
+                                if target_precompile == sovereign_consensus::system_registry::SYSTEM_ACCOUNT_HEIGHT {
+                                     if resolved_calldata.len() >= 20 {
+                                         let target_account = if resolved_calldata.len() >= 32 {
+                                             Address::from_slice(&resolved_calldata[12..32])
+                                         } else {
+                                             Address::from_slice(&resolved_calldata[0..20])
+                                         };
+                                         let mut sequence = 0u64;
+                                         let mut latest_hash = B256::ZERO;
+                                         let mut merit_rank = 0u64;
+                                         let mut q1 = 0u64;
+                                         let mut q2 = 0u64;
+                                         
+                                         if let Some(frontier) = reg.account_frontiers.get(&target_account) {
+                                             sequence = frontier.sequence;
+                                             latest_hash = frontier.latest_hash;
+                                             merit_rank = frontier.merit_rank as u64;
+                                             if let Some(ref compliance) = frontier.cached_compliance {
+                                                 q1 = compliance.0[0];
+                                                 q2 = compliance.0[1];
+                                             }
+                                         }
+                                         
+                                         let tier = reg.did_key_tier.get(&target_account).copied().unwrap_or(sovereign_consensus::pq_registry::KeyTier::Classical);
+                                         let key_tier = match tier {
+                                             sovereign_consensus::pq_registry::KeyTier::Classical => 0u64,
+                                             sovereign_consensus::pq_registry::KeyTier::QuantumReady => 1u64,
+                                             sovereign_consensus::pq_registry::KeyTier::QuantumOnly => 2u64,
+                                         };
+                                         
+                                         let mut out = Vec::with_capacity(192);
+                                         
+                                         // 1. sequence
+                                         out.extend_from_slice(&[0u8; 24]);
+                                         out.extend_from_slice(&sequence.to_be_bytes());
+                                         
+                                         // 2. latest_hash
+                                         out.extend_from_slice(latest_hash.as_slice());
+                                         
+                                         // 3. merit_rank
+                                         out.extend_from_slice(&[0u8; 24]);
+                                         out.extend_from_slice(&merit_rank.to_be_bytes());
+                                         
+                                         // 4. q1
+                                         out.extend_from_slice(&[0u8; 24]);
+                                         out.extend_from_slice(&q1.to_be_bytes());
+                                         
+                                         // 5. q2
+                                         out.extend_from_slice(&[0u8; 24]);
+                                         out.extend_from_slice(&q2.to_be_bytes());
+                                         
+                                         // 6. key_tier
+                                         out.extend_from_slice(&[0u8; 24]);
+                                         out.extend_from_slice(&key_tier.to_be_bytes());
+                                         
+                                         Some(format!("0x{}", alloy_primitives::hex::encode(&out)))
+                                     } else {
+                                         None
+                                     }
+                                } else if target_precompile == sovereign_consensus::system_registry::SYSTEM_DID_REGISTRY {
+                                    let mut resolved_did = None;
+                                    let is_addr = resolved_calldata.len() == 20 || resolved_calldata.len() == 32;
+                                    if is_addr {
+                                        let addr = if resolved_calldata.len() == 32 {
+                                            Address::from_slice(&resolved_calldata[12..32])
+                                        } else {
+                                            Address::from_slice(&resolved_calldata[0..20])
+                                        };
+                                        if let Some(did) = reg.get_did_by_address(&addr) {
+                                            resolved_did = Some(did);
+                                        }
+                                    } else if let Ok(did_str) = String::from_utf8(resolved_calldata.clone()) {
+                                        let normalized = sovereign_consensus::registry::ValidatorRegistry::normalize_query_did(&did_str);
+                                        if reg.is_did_registered(&normalized) {
+                                            resolved_did = Some(normalized);
+                                        } else if let Some(ident) = reg.find_identity_by_any_key(&normalized) {
+                                            resolved_did = Some(ident.did.clone());
+                                        }
+                                    }
+                                    
+                                    if let Some(ref did) = resolved_did {
+                                        let address = reg.get_address_by_did(did).map(|a| format!("{a:#x}"));
+                                        let mut keys = serde_json::Map::new();
+                                        if let Some(ident) = reg.identities.get(did) {
+                                            let doc = &ident.doc;
+                                            let encode_multibase = |prefix: &[u8], key: &[u8]| -> String {
+                                                let mut combined = prefix.to_vec();
+                                                combined.extend_from_slice(key);
+                                                format!("z{}", bs58::encode(&combined).into_string())
+                                            };
+                                            keys.insert("secp256k1".to_string(), json!(encode_multibase(&[0xe7, 0x01], &doc.secp256k1_pubkey)));
+                                            keys.insert("ed25519".to_string(), json!(encode_multibase(&[0xed, 0x01], &doc.ed25519_pubkey)));
+                                            keys.insert("bls12381".to_string(), json!(encode_multibase(&[0xea, 0x01], &doc.bls_pubkey)));
+                                            keys.insert("mldsa65".to_string(), json!(encode_multibase(&[0x93, 0x01], &doc.ml_dsa_pubkey)));
+                                            keys.insert("slhdsa".to_string(), json!(encode_multibase(&[0x94, 0x01], &doc.slh_dsa_pubkey)));
+                                            keys.insert("falcon".to_string(), json!(encode_multibase(&[0x92, 0x01], &doc.falcon_pubkey)));
+                                            keys.insert("xmss".to_string(), json!(encode_multibase(&[0x95, 0x01], &doc.xmss_pubkey)));
+                                        }
+                                        
+                                        let response_obj = json!({
+                                            "registered": true,
+                                            "did": resolved_did,
+                                            "address": address,
+                                            "keys": if keys.is_empty() { serde_json::Value::Null } else { serde_json::Value::Object(keys) }
+                                        });
+                                        let response_str = serde_json::to_string(&response_obj).unwrap_or_default();
+                                        
+                                        let str_bytes = response_str.as_bytes();
+                                        let mut out = vec![0u8; 32];
+                                        out[31] = 32;
+                                        
+                                        let mut len_bytes = [0u8; 32];
+                                        let str_len = str_bytes.len();
+                                        len_bytes[24..32].copy_from_slice(&(str_len as u64).to_be_bytes());
+                                        out.extend_from_slice(&len_bytes);
+                                        out.extend_from_slice(str_bytes);
+                                        
+                                        let remainder = out.len() % 32;
+                                        if remainder > 0 {
+                                            out.extend(vec![0u8; 32 - remainder]);
+                                        }
+                                        
+                                        Some(format!("0x{}", alloy_primitives::hex::encode(&out)))
+                                    } else {
+                                        Some("0x".to_string())
+                                    }
+                                } else if target_precompile == sovereign_consensus::system_registry::SYSTEM_RECEIVE_HOOK {
+                                    if resolved_calldata.len() >= 20 {
+                                        let target_addr = if resolved_calldata.len() >= 32 {
+                                            Address::from_slice(&resolved_calldata[12..32])
+                                        } else {
+                                            Address::from_slice(&resolved_calldata[0..20])
+                                        };
+                                        let mut sends = Vec::new();
+                                        for (hash, block) in &reg.lattice_blocks {
+                                            if let sovereign_consensus::stateless::LatticePayload::Send { recipient, amount } = &block.payload {
+                                                if *recipient == target_addr {
+                                                    sends.push((*hash, block, amount));
+                                                }
+                                            }
+                                        }
+                                        
+                                        let mut claimed = std::collections::HashSet::new();
+                                        for block in reg.lattice_blocks.values() {
+                                            if let sovereign_consensus::stateless::LatticePayload::Receive { send_block_hash, .. } = &block.payload {
+                                                claimed.insert(*send_block_hash);
+                                            }
+                                        }
+                                        
+                                        let mut pending = Vec::new();
+                                        for (send_hash, block, amount) in sends {
+                                            if !claimed.contains(&send_hash) {
+                                                pending.push(json!({
+                                                    "sendBlockHash": format!("{:#x}", send_hash),
+                                                    "sender": format!("{:#x}", block.account),
+                                                    "amount": amount.to_string(),
+                                                }));
+                                            }
+                                        }
+                                        
+                                        let response_str = serde_json::to_string(&pending).unwrap_or_default();
+                                        let str_bytes = response_str.as_bytes();
+                                        let mut out = vec![0u8; 32];
+                                        out[31] = 32;
+                                        
+                                        let mut len_bytes = [0u8; 32];
+                                        len_bytes[24..32].copy_from_slice(&(str_bytes.len() as u64).to_be_bytes());
+                                        out.extend_from_slice(&len_bytes);
+                                        out.extend_from_slice(str_bytes);
+                                        
+                                        let remainder = out.len() % 32;
+                                        if remainder > 0 {
+                                            out.extend(vec![0u8; 32 - remainder]);
+                                        }
+                                        
+                                        Some(format!("0x{}", alloy_primitives::hex::encode(&out)))
+                                    } else {
+                                        None
+                                    }
+                                } else if target_precompile == sovereign_consensus::system_registry::SYSTEM_BRIDGE {
+                                    if let Ok(cid) = String::from_utf8(resolved_calldata.clone()) {
+                                        let daemon = get_archival_daemon();
+                                        if std::env::var("SOVEREIGN_MOCK_SGX").is_ok() || cfg!(debug_assertions) {
+                                            let witness = sovereign_consensus::stateless::AccountWitness {
+                                                balance: alloy_primitives::U256::from(7_500_000u64),
+                                                nonce: 42,
+                                                code_hash: B256::repeat_byte(0xba),
+                                                code: b"somerevmbytecode".to_vec(),
+                                                quadrant_matrix: [0b11, 0b1000, 0, 0b10],
+                                            };
+                                            let _ = daemon.archive_account_witness(65001, &witness);
+                                        }
+                                        if let Ok(r) = daemon.resolve_account_witness(&cid) {
+                                            let mut out = vec![0u8; 32];
+                                            out.extend_from_slice(&r.balance.to_be_bytes::<32>());
+                                            
+                                            let mut nonce_bytes = [0u8; 32];
+                                            nonce_bytes[24..32].copy_from_slice(&r.nonce.to_be_bytes());
+                                            out.extend_from_slice(&nonce_bytes);
+                                            
+                                            out.extend_from_slice(r.code_hash.as_slice());
+                                            
+                                            let mut offset_bytes = [0u8; 32];
+                                            offset_bytes[31] = 128;
+                                            out.extend_from_slice(&offset_bytes);
+                                            
+                                            let mut len_bytes = [0u8; 32];
+                                            len_bytes[31] = 32;
+                                            out.extend_from_slice(&len_bytes);
+                                            for q in &r.quadrant_matrix {
+                                                out.extend_from_slice(&q.to_be_bytes());
+                                            }
+                                            
+                                            let remainder = out.len() % 32;
+                                            if remainder > 0 {
+                                                out.extend(vec![0u8; 32 - remainder]);
+                                            }
+                                            Some(format!("0x{}", alloy_primitives::hex::encode(&out)))
+                                        } else {
+                                            None
+                                        }
+                                    } else {
+                                        None
+                                    }
+                                } else if target_precompile == sovereign_consensus::system_registry::SYSTEM_JURISDICTION {
+                                    let manifold_id = if resolved_calldata.len() >= 8 {
+                                        u64::from_be_bytes(resolved_calldata[0..8].try_into().unwrap_or([0u8; 8]))
+                                    } else {
+                                        13371337u64
+                                    };
+                                    
+                                    let vector = reg.jurisdiction_vectors.get(&manifold_id).cloned().unwrap_or_else(|| {
+                                        let mut bit_registry = HashMap::new();
+                                        bit_registry.insert((1, 0), "KYC/AML Verified".to_string());
+                                        bit_registry.insert((1, 1), "Sanctioned Entity".to_string());
+                                        bit_registry.insert((1, 2), "PEP Flagged".to_string());
+                                        bit_registry.insert((2, 0), "Accredited Investor".to_string());
+                                        bit_registry.insert((2, 1), "Institutional".to_string());
+                                        
+                                        sovereign_consensus::jurisdiction::JurisdictionVector {
+                                            manifold_id,
+                                            active_q1_mask: 0,
+                                            required_q2_mask: 0,
+                                            velocity_limit: None,
+                                            appointed_enforcer_did: None,
+                                            epoch_established: 1,
+                                            compliance_root: [0; 32],
+                                            bit_registry,
+                                        }
+                                    });
+                                    
+                                    let mut serialized_bit_registry = serde_json::Map::new();
+                                    for ((q, b), label) in &vector.bit_registry {
+                                        serialized_bit_registry.insert(format!("{}_{}", q, b), json!(label));
+                                    }
+                                    
+                                    let response_obj = json!({
+                                        "manifoldId": vector.manifold_id,
+                                        "activeQ1Mask": vector.active_q1_mask.to_string(),
+                                        "requiredQ2Mask": vector.required_q2_mask.to_string(),
+                                        "epochEstablished": vector.epoch_established,
+                                        "bitRegistry": serialized_bit_registry
+                                    });
+                                    
+                                    let response_str = serde_json::to_string(&response_obj).unwrap_or_default();
+                                    let str_bytes = response_str.as_bytes();
+                                    let mut out = vec![0u8; 32];
+                                    out[31] = 32;
+                                    
+                                    let mut len_bytes = [0u8; 32];
+                                    len_bytes[24..32].copy_from_slice(&(str_bytes.len() as u64).to_be_bytes());
+                                    out.extend_from_slice(&len_bytes);
+                                    out.extend_from_slice(str_bytes);
+                                    
+                                    let remainder = out.len() % 32;
+                                    if remainder > 0 {
+                                        out.extend(vec![0u8; 32 - remainder]);
+                                    }
+                                    
+                                    Some(format!("0x{}", alloy_primitives::hex::encode(&out)))
+                                } else if target_precompile == sovereign_consensus::system_registry::SYSTEM_ACTUATOR {
+                                    if let Some(actor) = reg.actors.values().find(|a| Address::from_slice(&a.actor_id[0..20]) == to_addr) {
+                                        let inbox = reg.actor_inboxes.get(&actor.actor_id).cloned().unwrap_or_default();
+                                        let state_uint = match actor.state {
+                                            sovereign_consensus::actor::ActorState::InitiateIntent => 0u8,
+                                            sovereign_consensus::actor::ActorState::PrepareExecution => 1u8,
+                                            sovereign_consensus::actor::ActorState::Commit => 2u8,
+                                            sovereign_consensus::actor::ActorState::Rollback => 3u8,
+                                        };
+                                        
+                                        let mut out = vec![0u8; 32];
+                                        out[31] = state_uint;
+                                        
+                                        let mut sender_bytes = vec![0u8; 12];
+                                        sender_bytes.extend_from_slice(actor.sender.as_slice());
+                                        out.extend_from_slice(&sender_bytes);
+                                        
+                                        let mut recipient_bytes = vec![0u8; 12];
+                                        recipient_bytes.extend_from_slice(actor.recipient.as_slice());
+                                        out.extend_from_slice(&recipient_bytes);
+                                        
+                                        out.extend_from_slice(&actor.amount.to_be_bytes::<32>());
+                                        
+                                        let msg_count = U256::from(inbox.len());
+                                        out.extend_from_slice(&msg_count.to_be_bytes::<32>());
+                                        
+                                        Some(format!("0x{}", alloy_primitives::hex::encode(&out)))
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        };
+                        info!("📦 PROXY ETH_CALL RESULT: {:?}", hex_result_opt);
+                        
+                        if let Some(hex_result) = hex_result_opt {
+                            send_result(&mut client_stream, &id, json!(hex_result)).await;
+                            continue;
+                        }
+                    }
+                }
+
                 if let Some(result) = handle_wallet_method(method, &body_json) {
                     send_result(&mut client_stream, &id, result).await;
                     continue;
@@ -682,6 +1101,21 @@ pub async fn run_proxy(port: u16, reth_port: u16, chain_id: u64) -> Result<(), e
 
                 if method == "eth_sendRawTransaction" {
                     let raw_tx = body_json["params"][0].as_str().unwrap_or("");
+                    let clean_raw = raw_tx.trim_start_matches("0x");
+                    if let Ok(data_bytes) = alloy_primitives::hex::decode(clean_raw) {
+                        if let Ok(block) = <sovereign_consensus::stateless::LatticeBlock as scale::Decode>::decode(&mut &data_bytes[..]) {
+                            match sovereign_consensus::stateless::execute_lattice_block(&block) {
+                                Ok(hash) => {
+                                    send_result(&mut client_stream, &id, json!(format!("{:#x}", hash))).await;
+                                    continue;
+                                }
+                                Err(e) => {
+                                    send_error(&mut client_stream, &id, -32003, &e.to_string()).await;
+                                    continue;
+                                }
+                            }
+                        }
+                    }
 
                     let foreign_chain = extract_header(&request_str, "x-sovereign-chain-id");
                     if let Some(chain_ns) = foreign_chain {
@@ -702,21 +1136,16 @@ pub async fn run_proxy(port: u16, reth_port: u16, chain_id: u64) -> Result<(), e
                         reg.is_did_fully_registered(did)
                     } else {
                         decode_sender(raw_tx).map(|sender_addr| {
-                            let is_dev = cfg!(debug_assertions) 
-                                || std::env::var("SOVEREIGN_MOCK_SGX").is_ok()
-                                || std::env::args().any(|arg| arg == "--dev");
-                            if is_dev && sender_addr == "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266".parse::<Address>().unwrap() {
-                                true
-                            } else {
-                                let reg = get_registry().read().unwrap();
-                                reg.get_did_by_address(&sender_addr)
-                                    .map(|did| reg.is_did_fully_registered(&did))
-                                    .unwrap_or(false)
-                            }
+                            let reg = get_registry().read().unwrap();
+                            reg.get_did_by_address(&sender_addr)
+                                .map(|did| reg.is_did_fully_registered(&did))
+                                .unwrap_or(false)
                         }).unwrap_or(false)
                     };
 
-                    if !is_authorized {
+                    let is_did_reg = decode_tx_to(raw_tx) == Some(sovereign_consensus::system_registry::SYSTEM_DID_REGISTRY);
+
+                    if !is_authorized && !is_did_reg {
                         send_error(&mut client_stream, &id, -32001,
                             "Sovereign Wallet Error: Active DID not registered. Please onboard via sovereign_registerDid first."
                         ).await;
@@ -738,14 +1167,19 @@ pub async fn run_proxy(port: u16, reth_port: u16, chain_id: u64) -> Result<(), e
                             for (hash, block) in &reg.lattice_blocks {
                                 if let sovereign_consensus::stateless::LatticePayload::Send { recipient, amount } = &block.payload {
                                     if *recipient == sender && !claimed.contains(hash) {
-                                        pending.push((*hash, *amount));
+                                        let is_evm = block.signature.is_empty()
+                                            || block.signature == vec![0x00]
+                                            || (block.signature.len() > 0 && (block.signature[0] == 248 || block.signature[0] == 249));
+                                        pending.push((*hash, *amount, is_evm));
                                     }
                                 }
                             }
                             pending.sort_by(|a, b| b.1.cmp(&a.1));
-                            for (hash, amount) in pending.iter().take(20) {
+                            for (hash, amount, is_evm) in pending.iter().take(20) {
                                 unclaimed_hashes.push(*hash);
-                                inbox_value = inbox_value.saturating_add(*amount);
+                                if !*is_evm {
+                                    inbox_value = inbox_value.saturating_add(*amount);
+                                }
                             }
                         }
                     }
@@ -766,8 +1200,47 @@ pub async fn run_proxy(port: u16, reth_port: u16, chain_id: u64) -> Result<(), e
 
                         info!("PROXY_TX: sender={:#x}, inbox_value={}, is_pure_self_send={}, settled_balance={}, upfront_cost={}", sender, inbox_value, is_pure_self_send, settled_balance, upfront_cost);
 
+                            if is_pure_self_send && !unclaimed_hashes.is_empty() {
+                                 let funding_tx_hash = match send_funding_tx(reth_port, sender, inbox_value).await {
+                                     Ok(h) => h,
+                                     Err(e) => {
+                                         send_error(&mut client_stream, &id, -32603, &format!("Zero-gas sweep credit failed: {e}")).await;
+                                         continue;
+                                     }
+                                 };
+
+                                 get_auto_claims().write().unwrap().insert(funding_tx_hash, unclaimed_hashes.clone());
+
+                                 let synthetic_hash = B256::random();
+                                 get_synthetic_tx_hashes().write().unwrap().insert(funding_tx_hash, synthetic_hash);
+
+                                 let mut original_sender = Address::ZERO;
+                                 if let Ok(reg) = get_registry().read() {
+                                     if let Some(first_hash) = unclaimed_hashes.first() {
+                                         if let Some(block) = reg.lattice_blocks.get(first_hash) {
+                                             original_sender = block.account;
+                                         }
+                                     }
+                                 }
+
+                                 let meta = SyntheticMeta {
+                                     original_sender,
+                                     receiver: sender,
+                                     inbox_value,
+                                     nonce: tx_nonce,
+                                     block_hash: B256::ZERO,
+                                     block_number: 0,
+                                 };
+                                 get_synthetic_meta().write().unwrap().insert(synthetic_hash, meta);
+                                 // No auto-creation of Receive blocks. The recipient must explicitly submit Receive blocks via SYSTEM_RECEIVE_HOOK to claim.
+
+                                 insert_synthetic_receipt(synthetic_hash, sender);
+                                 send_result(&mut client_stream, &id, json!(format!("{synthetic_hash:#x}"))).await;
+                                 continue;
+                            }
+
                         if settled_balance < upfront_cost {
-                            let passes_validation = (effective_balance >= upfront_cost) || (is_pure_self_send && inbox_value > 0);
+                            let passes_validation = (effective_balance >= upfront_cost) || (is_pure_self_send && !unclaimed_hashes.is_empty());
 
                             if !passes_validation {
                                 let body = json!({
@@ -782,104 +1255,16 @@ pub async fn run_proxy(port: u16, reth_port: u16, chain_id: u64) -> Result<(), e
                                 continue;
                             }
 
-                            if is_pure_self_send && inbox_value > 0 {
-                                 let funding_tx_hash = match send_funding_tx(reth_port, sender, inbox_value).await {
-                                     Ok(h) => h,
-                                     Err(e) => {
-                                         send_error(&mut client_stream, &id, -32603, &format!("Zero-gas sweep credit failed: {e}")).await;
-                                         continue;
-                                     }
-                                 };
-
-                                 let synthetic_hash = B256::random();
-                                 get_synthetic_tx_hashes().write().unwrap().insert(funding_tx_hash, synthetic_hash);
-
-                                 let mut original_sender = Address::ZERO;
-                                 if let Ok(reg) = get_registry().read() {
-                                     if let Some(first_hash) = unclaimed_hashes.first() {
-                                         if let Some(block) = reg.lattice_blocks.get(first_hash) {
-                                             original_sender = block.account;
-                                         }
-                                     }
-                                 }
-
-                                 let meta = SyntheticMeta {
-                                     original_sender,
-                                     receiver: sender,
-                                     inbox_value,
-                                     nonce: tx_nonce,
-                                     block_hash: B256::ZERO,
-                                     block_number: 0,
-                                 };
-                                 get_synthetic_meta().write().unwrap().insert(synthetic_hash, meta);
-                                 {
-                                     let mut reg = get_registry().write().unwrap();
-                                     for send_hash in &unclaimed_hashes {
-                                         let mut frontier = reg.get_or_create_frontier(sender);
-                                         let next_seq = frontier.sequence + 1;
-                                         let prev_hash = frontier.latest_hash;
-
-                                         let receive_block = sovereign_consensus::stateless::LatticeBlock {
-                                             account: sender,
-                                             previous_hash: prev_hash,
-                                             sequence: next_seq,
-                                             payload: sovereign_consensus::stateless::LatticePayload::Receive {
-                                                 send_block_hash: *send_hash,
-                                                 amount: U256::from(0),
-                                             },
-                                             signature: vec![],
-                                             static_witnesses: vec![],
-                                         };
-                                         let receive_block_hash = alloy_primitives::keccak256(&scale::Encode::encode(&receive_block));
-                                         
-                                         frontier.latest_hash = receive_block_hash;
-                                         frontier.sequence = next_seq;
-                                         reg.update_frontier(sender, frontier);
-                                         reg.lattice_blocks.insert(receive_block_hash, receive_block);
-                                     }
-                                 }
-
-                                 insert_synthetic_receipt(synthetic_hash, sender);
-                                 send_result(&mut client_stream, &id, json!(format!("{synthetic_hash:#x}"))).await;
-                                 continue;
-                            }
-
                             if inbox_value > 0 {
                                 if let Err(e) = send_funding_tx(reth_port, sender, inbox_value).await {
                                     send_error(&mut client_stream, &id, -32603, &format!("Auto-claim funding failed: {e}")).await;
                                     continue;
                                 }
-                                {
-                                    let mut reg = get_registry().write().unwrap();
-                                    for send_hash in &unclaimed_hashes {
-                                        let mut frontier = reg.get_or_create_frontier(sender);
-                                        let next_seq = frontier.sequence + 1;
-                                        let prev_hash = frontier.latest_hash;
-
-                                        let receive_block = sovereign_consensus::stateless::LatticeBlock {
-                                            account: sender,
-                                            previous_hash: prev_hash,
-                                            sequence: next_seq,
-                                            payload: sovereign_consensus::stateless::LatticePayload::Receive {
-                                                send_block_hash: *send_hash,
-                                                amount: U256::from(0),
-                                            },
-                                            signature: vec![],
-                                            static_witnesses: vec![],
-                                        };
-                                        let receive_block_hash = alloy_primitives::keccak256(&scale::Encode::encode(&receive_block));
-                                        
-                                        frontier.latest_hash = receive_block_hash;
-                                        frontier.sequence = next_seq;
-                                        reg.update_frontier(sender, frontier);
-                                        reg.lattice_blocks.insert(receive_block_hash, receive_block);
-                                    }
-                                }
                             }
                         } else {
                             // If they have enough settled balance, but they are doing a self-send sweep,
                             // or have unclaimed inbox, we still mark the inbox as claimed in the registry!
-                            if is_pure_self_send && inbox_value > 0 {
+                            if is_pure_self_send && !unclaimed_hashes.is_empty() {
                                  let funding_tx_hash = match send_funding_tx(reth_port, sender, inbox_value).await {
                                      Ok(h) => h,
                                      Err(e) => {
@@ -887,6 +1272,8 @@ pub async fn run_proxy(port: u16, reth_port: u16, chain_id: u64) -> Result<(), e
                                          continue;
                                      }
                                  };
+
+                                 get_auto_claims().write().unwrap().insert(funding_tx_hash, unclaimed_hashes.clone());
 
                                  let synthetic_hash = B256::random();
                                  get_synthetic_tx_hashes().write().unwrap().insert(funding_tx_hash, synthetic_hash);
@@ -909,32 +1296,7 @@ pub async fn run_proxy(port: u16, reth_port: u16, chain_id: u64) -> Result<(), e
                                      block_number: 0,
                                  };
                                  get_synthetic_meta().write().unwrap().insert(synthetic_hash, meta);
-                                {
-                                    let mut reg = get_registry().write().unwrap();
-                                    for send_hash in &unclaimed_hashes {
-                                        let mut frontier = reg.get_or_create_frontier(sender);
-                                        let next_seq = frontier.sequence + 1;
-                                        let prev_hash = frontier.latest_hash;
-
-                                        let receive_block = sovereign_consensus::stateless::LatticeBlock {
-                                            account: sender,
-                                            previous_hash: prev_hash,
-                                            sequence: next_seq,
-                                            payload: sovereign_consensus::stateless::LatticePayload::Receive {
-                                                send_block_hash: *send_hash,
-                                                amount: U256::from(0),
-                                            },
-                                            signature: vec![],
-                                            static_witnesses: vec![],
-                                        };
-                                        let receive_block_hash = alloy_primitives::keccak256(&scale::Encode::encode(&receive_block));
-                                        
-                                        frontier.latest_hash = receive_block_hash;
-                                        frontier.sequence = next_seq;
-                                        reg.update_frontier(sender, frontier);
-                                        reg.lattice_blocks.insert(receive_block_hash, receive_block);
-                                    }
-                                }
+                                 // No auto-creation of Receive blocks. The recipient must explicitly submit Receive blocks via SYSTEM_RECEIVE_HOOK to claim.
 
                                 insert_synthetic_receipt(synthetic_hash, sender);
                                 send_result(&mut client_stream, &id, json!(format!("{synthetic_hash:#x}"))).await;
@@ -996,14 +1358,21 @@ pub async fn run_proxy(port: u16, reth_port: u16, chain_id: u64) -> Result<(), e
                     continue;
                 }
 
-                // Intercept eth_estimateGas for stateless pure self-sends
+                // Intercept eth_estimateGas for stateless pure self-sends and system addresses
                 if method == "eth_estimateGas" {
                     if let Some(param) = body_json["params"].get(0) {
                         let from = param["from"].as_str().unwrap_or("");
-                        let to = param["to"].as_str().unwrap_or("");
+                        let to_str = param["to"].as_str().unwrap_or("");
                         let data = param["data"].as_str().or_else(|| param["input"].as_str()).unwrap_or("");
-                        if !from.is_empty() && from.eq_ignore_ascii_case(to) && (data.is_empty() || data == "0x") {
-                            send_result(&mut client_stream, &id, json!("0x5208")).await;
+                        
+                        let is_sys = if let Ok(to_addr) = to_str.parse::<Address>() {
+                            sovereign_consensus::system_registry::is_system_address(&to_addr)
+                        } else {
+                            false
+                        };
+
+                        if is_sys || (!from.is_empty() && from.eq_ignore_ascii_case(to_str) && (data.is_empty() || data == "0x")) {
+                            send_result(&mut client_stream, &id, json!("0x7a120")).await;
                             continue;
                         }
                     }
@@ -1115,6 +1484,11 @@ pub async fn run_proxy(port: u16, reth_port: u16, chain_id: u64) -> Result<(), e
 
                         let synthetic_meta_opt = get_synthetic_meta().read().unwrap().get(&lookup_hash).cloned();
                         if let Some(meta) = synthetic_meta_opt {
+                            if meta.block_number == 0 {
+                                let body = json!({ "jsonrpc": "2.0", "result": serde_json::Value::Null, "id": id }).to_string();
+                                write_json(&mut client_stream, &body).await;
+                                continue;
+                            }
                             let receipt = json!({
                                 "transactionHash": format!("{tx_hash:#x}"),
                                 "transactionIndex": "0x0",
@@ -1154,6 +1528,11 @@ pub async fn run_proxy(port: u16, reth_port: u16, chain_id: u64) -> Result<(), e
 
                         let outbound_meta_opt = get_outbound_meta().read().unwrap().get(&tx_hash).cloned();
                         if let Some(meta) = outbound_meta_opt {
+                            if meta.virtual_block_number == 0 {
+                                let body = json!({ "jsonrpc": "2.0", "result": serde_json::Value::Null, "id": id }).to_string();
+                                write_json(&mut client_stream, &body).await;
+                                continue;
+                            }
                             let receipt = json!({
                                 "transactionHash": format!("{tx_hash:#x}"),
                                 "transactionIndex": "0x0",
@@ -1300,185 +1679,6 @@ fn handle_wallet_method(method: &str, body_json: &serde_json::Value) -> Option<s
                 }))
             }
         },
-        // TODO: Having two distinct endpoints (sovereign_getDid and sovereign_getDidByAddress) might not be optimal.
-        // We should combine them into a single, unified DID lookup system that treats different curves universally.
-        // It shouldn't matter what curve ID is used as the primary DID resolver: the lookup should check the primary
-        // mapping first, and if not found, cascade-query the other lookup tables until we are certain there is no
-        // registered DID under any supported curve.
-        "sovereign_getDid" => {
-            let did_input = body_json["params"][0].as_str().unwrap_or("");
-            let reg = get_registry().read().unwrap();
-            let did_uri = sovereign_consensus::registry::ValidatorRegistry::normalize_query_did(did_input);
-            let registered = reg.is_did_registered(&did_uri);
-            let address = reg.get_address_by_did(&did_uri).map(|a| format!("{a:#x}"));
-
-            let resolved_did = if let Some(ident) = reg.find_identity_by_any_key(&did_uri) {
-                ident.did.clone()
-            } else if let Some(addr) = sovereign_consensus::registry::ValidatorRegistry::extract_address_from_did(&did_uri) {
-                reg.get_did_by_address(&addr).unwrap_or(did_uri)
-            } else {
-                did_uri
-            };
-            
-            let mut keys = serde_json::Map::new();
-            if let Some(ident) = reg.identities.get(&resolved_did) {
-                let doc = &ident.doc;
-                let encode_multibase = |prefix: &[u8], key: &[u8]| -> String {
-                    let mut combined = prefix.to_vec();
-                    combined.extend_from_slice(key);
-                    format!("z{}", bs58::encode(&combined).into_string())
-                };
-                keys.insert("secp256k1".to_string(), json!(encode_multibase(&[0xe7, 0x01], &doc.secp256k1_pubkey)));
-                keys.insert("ed25519".to_string(), json!(encode_multibase(&[0xed, 0x01], &doc.ed25519_pubkey)));
-                keys.insert("bls12381".to_string(), json!(encode_multibase(&[0xea, 0x01], &doc.bls_pubkey)));
-                keys.insert("mldsa65".to_string(), json!(encode_multibase(&[0x93, 0x01], &doc.ml_dsa_pubkey)));
-                keys.insert("slhdsa".to_string(), json!(encode_multibase(&[0x94, 0x01], &doc.slh_dsa_pubkey)));
-                keys.insert("falcon".to_string(), json!(encode_multibase(&[0x92, 0x01], &doc.falcon_pubkey)));
-                keys.insert("xmss".to_string(), json!(encode_multibase(&[0x95, 0x01], &doc.xmss_pubkey)));
-            }
-
-            Some(json!({
-                "registered": registered,
-                "did": resolved_did,
-                "address": address,
-                "keys": if keys.is_empty() { serde_json::Value::Null } else { serde_json::Value::Object(keys) }
-            }))
-        },
-        "sovereign_getDidByAddress" => {
-            let addr_str = body_json["params"][0].as_str().unwrap_or("");
-            let reg = get_registry().read().unwrap();
-            let mut resolved_did = None;
-            if let Ok(addr) = addr_str.parse::<Address>() {
-                if let Some(did) = reg.get_did_by_address(&addr) {
-                    resolved_did = Some(did);
-                }
-            }
-            if let Some(ref did) = resolved_did {
-                let address = reg.get_address_by_did(did).map(|a| format!("{a:#x}"));
-                let mut keys = serde_json::Map::new();
-                if let Some(ident) = reg.identities.get(did) {
-                    let doc = &ident.doc;
-                    let encode_multibase = |prefix: &[u8], key: &[u8]| -> String {
-                        let mut combined = prefix.to_vec();
-                        combined.extend_from_slice(key);
-                        format!("z{}", bs58::encode(&combined).into_string())
-                    };
-                    keys.insert("secp256k1".to_string(), json!(encode_multibase(&[0xe7, 0x01], &doc.secp256k1_pubkey)));
-                    keys.insert("ed25519".to_string(), json!(encode_multibase(&[0xed, 0x01], &doc.ed25519_pubkey)));
-                    keys.insert("bls12381".to_string(), json!(encode_multibase(&[0xea, 0x01], &doc.bls_pubkey)));
-                    keys.insert("mldsa65".to_string(), json!(encode_multibase(&[0x93, 0x01], &doc.ml_dsa_pubkey)));
-                    keys.insert("slhdsa".to_string(), json!(encode_multibase(&[0x94, 0x01], &doc.slh_dsa_pubkey)));
-                    keys.insert("falcon".to_string(), json!(encode_multibase(&[0x92, 0x01], &doc.falcon_pubkey)));
-                    keys.insert("xmss".to_string(), json!(encode_multibase(&[0x95, 0x01], &doc.xmss_pubkey)));
-                }
-                Some(json!({
-                    "registered": true,
-                    "did": did,
-                    "address": address,
-                    "keys": if keys.is_empty() { serde_json::Value::Null } else { serde_json::Value::Object(keys) }
-                }))
-            } else {
-                Some(json!({
-                    "registered": false,
-                    "did": null,
-                    "address": addr_str,
-                    "keys": null
-                }))
-            }
-        },
-        "sovereign_getStatelessWitness" => {
-            let cid = body_json["params"][0].as_str().unwrap_or("");
-            let daemon = get_archival_daemon();
-            // Pre-seed mock data if needed for testing/mocking
-            if std::env::var("SOVEREIGN_MOCK_SGX").is_ok() || cfg!(debug_assertions) {
-                let witness = sovereign_consensus::stateless::AccountWitness {
-                    balance: alloy_primitives::U256::from(7_500_000u64),
-                    nonce: 42,
-                    code_hash: B256::repeat_byte(0xba),
-                    code: b"somerevmbytecode".to_vec(),
-                    quadrant_matrix: [0b11, 0b1000, 0, 0b10],
-                };
-                let _ = daemon.archive_account_witness(65001, &witness);
-            }
-            let resolved = daemon.resolve_account_witness(cid).ok();
-            if let Some(r) = resolved {
-                Some(json!({
-                    "balance": format!("{:?}", r.balance),
-                    "nonce": r.nonce,
-                    "codeHash": format!("{:?}", r.code_hash),
-                    "quadrantMatrix": r.quadrant_matrix
-                }))
-            } else {
-                Some(json!({
-                    "error": {
-                        "code": -32004,
-                        "message": "Stateless witness not found for CID"
-                    }
-                }))
-            }
-        },
-        "sovereign_sendBlock" => {
-            let block_val = &body_json["params"][0];
-            let block: Result<sovereign_consensus::stateless::LatticeBlock, _> = serde_json::from_value(block_val.clone());
-            match block {
-                Ok(b) => {
-                    match sovereign_consensus::stateless::execute_lattice_block(&b) {
-                        Ok(hash) => Some(json!({ "status": "success", "hash": format!("{:#x}", hash) })),
-                        Err(e) => Some(json!({ "error": { "code": -32000, "message": e } })),
-                    }
-                }
-                Err(err) => Some(json!({ "error": { "code": -32602, "message": format!("Invalid block parameter: {}", err) } })),
-            }
-        },
-        "sovereign_getAccountFrontier" => {
-            let addr_str = body_json["params"][0].as_str().unwrap_or("");
-            if let Ok(addr) = addr_str.parse::<alloy_primitives::Address>() {
-                let registry_lock = sovereign_consensus::registry::get_registry();
-                let mut reg = registry_lock.write().unwrap();
-                let frontier = reg.get_or_create_frontier(addr);
-                Some(json!({
-                    "latestHash": format!("{:#x}", frontier.latest_hash),
-                    "sequence": frontier.sequence,
-                    "locked": frontier.locked,
-                    "snapshotSize": frontier.snapshot_size,
-                }))
-            } else {
-                Some(json!({ "error": { "code": -32602, "message": "Invalid address parameter" } }))
-            }
-        },
-        "sovereign_getPendingReceives" => {
-            let addr_str = body_json["params"][0].as_str().unwrap_or("");
-            if let Ok(addr) = addr_str.parse::<alloy_primitives::Address>() {
-                let registry_lock = sovereign_consensus::registry::get_registry();
-                let reg = registry_lock.read().unwrap();
-                
-                let mut sends = Vec::new();
-                for (hash, block) in &reg.lattice_blocks {
-                    if let sovereign_consensus::stateless::LatticePayload::Send { recipient, amount } = &block.payload {
-                        if *recipient == addr {
-                            sends.push((*hash, block, amount));
-                        }
-                    }
-                }
-                
-                let mut pending = Vec::new();
-                for (send_hash, block, amount) in sends {
-                    let already_received = reg.lattice_blocks.values().any(|b| {
-                        b.account == addr && matches!(&b.payload, sovereign_consensus::stateless::LatticePayload::Receive { send_block_hash, .. } if *send_block_hash == send_hash)
-                    });
-                    if !already_received {
-                        pending.push(json!({
-                            "sendBlockHash": format!("{:#x}", send_hash),
-                            "sender": format!("{:#x}", block.account),
-                            "amount": amount.to_string(),
-                        }));
-                    }
-                }
-                Some(json!(pending))
-            } else {
-                Some(json!({ "error": { "code": -32602, "message": "Invalid address parameter" } }))
-            }
-        },
         _ if method.starts_with("wallet_") || method.starts_with("sovereign_") => Some(json!(null)),
         _ => None,
     }
@@ -1536,6 +1736,14 @@ fn synthesize_transfer_logs(filter: &serde_json::Value) -> Vec<serde_json::Value
         }
     }
     logs
+}
+
+fn decode_tx_to(raw_tx: &str) -> Option<Address> {
+    let stripped = raw_tx.strip_prefix("0x")?;
+    let bytes = alloy_primitives::hex::decode(stripped).ok()?;
+    let mut data = &bytes[..];
+    let tx = <TxEnvelope as Decodable>::decode(&mut data).ok()?;
+    tx.to()
 }
 
 fn decode_sender(raw_tx: &str) -> Option<Address> {
@@ -1651,6 +1859,7 @@ async fn send_funding_tx(reth_port: u16, target: Address, value: U256) -> Result
     Ok(tx_hash)
 }
 
+#[allow(dead_code)]
 async fn fund_gas_if_needed(reth_port: u16, target: Address, gas_price: U256, gas_limit: u64) {
     let needed = gas_price.saturating_mul(U256::from(gas_limit));
     if needed.is_zero() {
@@ -1886,15 +2095,26 @@ fn index_from_raw_tx(raw_tx: &str, tx_hash: B256, sender: Address) {
 
     {
         let mut reg = get_registry().write().unwrap();
+        let mut frontier = reg.get_or_create_frontier(sender);
+        let next_seq = frontier.sequence + 1;
+        let prev_hash = frontier.latest_hash;
+
         let payload = sovereign_consensus::stateless::LatticePayload::Send { recipient: to, amount: value };
         let send_block = sovereign_consensus::stateless::LatticeBlock {
             account: sender,
-            previous_hash: B256::ZERO,
-            sequence: 0,
+            previous_hash: prev_hash,
+            sequence: next_seq,
             payload,
             signature: bytes.clone(),
             static_witnesses: vec![],
         };
+
+        let block_bytes = scale::Encode::encode(&send_block);
+        let send_block_hash = alloy_primitives::keccak256(&block_bytes);
+
+        frontier.latest_hash = send_block_hash;
+        frontier.sequence = next_seq;
+        reg.update_frontier(sender, frontier);
         reg.lattice_blocks.insert(tx_hash, send_block);
     }
 
@@ -2079,7 +2299,7 @@ async fn sync_hot_storage(reth_port: u16) {
                         }
                     }
 
-                    let mut reg = get_registry().write().unwrap();
+                    let reg = get_registry().read().unwrap();
                     let mut state = get_state().write().unwrap();
                     let record = NativeTransferRecord {
                         tx_hash: synthetic_hash,
@@ -2108,16 +2328,28 @@ async fn sync_hot_storage(reth_port: u16) {
                 if value > U256::ZERO && from_addr != Address::ZERO && to_addr != Address::ZERO {
                     {
                         let mut reg = get_registry().write().unwrap();
-                        let payload = sovereign_consensus::stateless::LatticePayload::Send { recipient: to_addr, amount: value };
-                        let send_block = sovereign_consensus::stateless::LatticeBlock {
-                            account: from_addr,
-                            previous_hash: B256::ZERO,
-                            sequence: 0,
-                            payload,
-                            signature: vec![],
-                            static_witnesses: vec![],
-                        };
-                        reg.lattice_blocks.insert(tx_hash, send_block);
+                        if !reg.lattice_blocks.contains_key(&tx_hash) {
+                            let mut frontier = reg.get_or_create_frontier(from_addr);
+                            let next_seq = frontier.sequence + 1;
+                            let prev_hash = frontier.latest_hash;
+
+                            let payload = sovereign_consensus::stateless::LatticePayload::Send { recipient: to_addr, amount: value };
+                            let send_block = sovereign_consensus::stateless::LatticeBlock {
+                                account: from_addr,
+                                previous_hash: prev_hash,
+                                sequence: next_seq,
+                                payload,
+                                signature: vec![],
+                                static_witnesses: vec![],
+                            };
+                            let block_bytes = scale::Encode::encode(&send_block);
+                            let send_block_hash = alloy_primitives::keccak256(&block_bytes);
+
+                            frontier.latest_hash = send_block_hash;
+                            frontier.sequence = next_seq;
+                            reg.update_frontier(from_addr, frontier);
+                            reg.lattice_blocks.insert(tx_hash, send_block);
+                        }
                     }
 
                     let v = tx_obj["v"].as_str().unwrap_or("0x1c").to_string();

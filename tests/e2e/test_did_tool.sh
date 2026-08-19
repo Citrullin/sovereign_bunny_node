@@ -38,11 +38,6 @@ DEV_ADDR="0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
 WALLET_A_SEED="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 WALLET_B_SEED="0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
 
-echo "✅ Step 0: Onboard genesis dev account..."
-curl -s -X POST -H "Content-Type: application/json" \
-  --data "{\"jsonrpc\":\"2.0\",\"method\":\"sovereign_registerDidKeys\",\"params\":[\"did:sovereign:1337:$DEV_ADDR\"],\"id\":1}" \
-  http://127.0.0.1:8545
-
 echo "✅ Step 1: Onboard Wallet A (Sender) DID keys..."
 OUTPUT_A=$(./target/debug/did-tool register set --seed "$WALLET_A_SEED" --rpc-url "http://localhost:8545")
 WALLET_A_DERIVED_ADDR=$(echo "$OUTPUT_A" | grep "EVM Address:" | cut -d':' -f2 | xargs)

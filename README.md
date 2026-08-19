@@ -271,3 +271,21 @@ gramine-sgx sovereign-reth node \
   --tee sgx \
   --approved-mrenclave 0x...
 ```
+
+---
+
+### 5. Running the Self-Hosted Sovereign Wallet dAPP
+
+The Sovereign Wallet is an offline-first Web3 application served locally to satisfy browser extension origin constraints.
+
+```bash
+# Start the local web server serving the inlined app assets
+cd wallet
+./run-local-server.sh
+```
+
+Then open [http://localhost:8080](http://localhost:8080) to interact with the dAPP:
+1. **Connect EVM Wallet**: Pairs with your browser extension (Rabby, MetaMask, etc.) targeting chain ID `13371337`.
+2. **Onboard**: Inputs a profile password to generate and encrypt your auxiliary key set (secp256k1, ed25519, ML-DSA, SLH-DSA, Falcon).
+3. **Declare Jurisdiction**: Selects your Country/Region from the dropdown to submit a Quadrant 2 consensus proposal.
+

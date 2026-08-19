@@ -166,28 +166,37 @@ impl ParallelExecutor for WaveExecutor {
                     if sender_acc.nonce != tx.nonce {
                         return Err(format!("Nonce mismatch for {:?}: expected {}, found {}", tx.sender, tx.nonce, sender_acc.nonce));
                     }
-                    // Pre-Execution Auto-Claim Pipeline (Task B):
-                    let auto_claim_amount = if let Ok(reg) = crate::registry::get_registry().read() {
+                    // Pre-Execution Block-Lattice Balance Calculation:
+                    let balance_adjustment = if let Ok(reg) = crate::registry::get_registry().read() {
                         let mut claimed = std::collections::HashSet::new();
                         for block in reg.lattice_blocks.values() {
                             if let crate::stateless::LatticePayload::Receive { send_block_hash, .. } = &block.payload {
                                 claimed.insert(*send_block_hash);
                             }
                         }
-                        let mut pending = Vec::new();
+                        let mut to_add = alloy_primitives::U256::ZERO;
+                        let mut to_sub = alloy_primitives::U256::ZERO;
                         for (hash, block) in &reg.lattice_blocks {
                             if let crate::stateless::LatticePayload::Send { recipient, amount } = &block.payload {
-                                if *recipient == tx.sender && !claimed.contains(hash) {
-                                    pending.push(*amount);
+                                if *recipient == tx.sender {
+                                    let is_evm_tx = block.signature.is_empty();
+                                    if is_evm_tx {
+                                        if !claimed.contains(hash) {
+                                            to_sub = to_sub.saturating_add(*amount);
+                                        }
+                                    } else {
+                                        if claimed.contains(hash) {
+                                            to_add = to_add.saturating_add(*amount);
+                                        }
+                                    }
                                 }
                             }
                         }
-                        pending.sort_by(|a, b| b.cmp(a));
-                        pending.iter().take(20).sum::<alloy_primitives::U256>()
+                        (to_add, to_sub)
                     } else {
-                        alloy_primitives::U256::ZERO
+                        (alloy_primitives::U256::ZERO, alloy_primitives::U256::ZERO)
                     };
-                    sender_acc.balance += auto_claim_amount;
+                    sender_acc.balance = sender_acc.balance.saturating_add(balance_adjustment.0).saturating_sub(balance_adjustment.1);
 
                     if sender_acc.balance < tx.value {
                         return Err(format!("Insufficient balance for {:?}", tx.sender));
@@ -407,28 +416,37 @@ impl ParallelExecutor for PevmExecutor {
                     if sender_acc.nonce != tx_clone.nonce {
                         return Err(format!("Nonce mismatch for {:?}: expected {}, found {}", tx_clone.sender, tx_clone.nonce, sender_acc.nonce));
                     }
-                    // Pre-Execution Auto-Claim Pipeline (Task B):
-                    let auto_claim_amount = if let Ok(reg) = crate::registry::get_registry().read() {
+                    // Pre-Execution Block-Lattice Balance Calculation:
+                    let balance_adjustment = if let Ok(reg) = crate::registry::get_registry().read() {
                         let mut claimed = std::collections::HashSet::new();
                         for block in reg.lattice_blocks.values() {
                             if let crate::stateless::LatticePayload::Receive { send_block_hash, .. } = &block.payload {
                                 claimed.insert(*send_block_hash);
                             }
                         }
-                        let mut pending = Vec::new();
+                        let mut to_add = alloy_primitives::U256::ZERO;
+                        let mut to_sub = alloy_primitives::U256::ZERO;
                         for (hash, block) in &reg.lattice_blocks {
                             if let crate::stateless::LatticePayload::Send { recipient, amount } = &block.payload {
-                                if *recipient == tx_clone.sender && !claimed.contains(hash) {
-                                    pending.push(*amount);
+                                if *recipient == tx_clone.sender {
+                                    let is_evm_tx = block.signature.is_empty();
+                                    if is_evm_tx {
+                                        if !claimed.contains(hash) {
+                                            to_sub = to_sub.saturating_add(*amount);
+                                        }
+                                    } else {
+                                        if claimed.contains(hash) {
+                                            to_add = to_add.saturating_add(*amount);
+                                        }
+                                    }
                                 }
                             }
                         }
-                        pending.sort_by(|a, b| b.cmp(a));
-                        pending.iter().take(20).sum::<alloy_primitives::U256>()
+                        (to_add, to_sub)
                     } else {
-                        alloy_primitives::U256::ZERO
+                        (alloy_primitives::U256::ZERO, alloy_primitives::U256::ZERO)
                     };
-                    sender_acc.balance += auto_claim_amount;
+                    sender_acc.balance = sender_acc.balance.saturating_add(balance_adjustment.0).saturating_sub(balance_adjustment.1);
 
                     if sender_acc.balance < tx_clone.value {
                         return Err(format!("Insufficient balance for {:?}", tx_clone.sender));
@@ -594,28 +612,37 @@ impl ParallelExecutor for GrevmExecutor {
                     if sender_acc.nonce != tx.nonce {
                         return Err(format!("Nonce mismatch for {:?}: expected {}, found {}", tx.sender, tx.nonce, sender_acc.nonce));
                     }
-                    // Pre-Execution Auto-Claim Pipeline (Task B):
-                    let auto_claim_amount = if let Ok(reg) = crate::registry::get_registry().read() {
+                    // Pre-Execution Block-Lattice Balance Calculation:
+                    let balance_adjustment = if let Ok(reg) = crate::registry::get_registry().read() {
                         let mut claimed = std::collections::HashSet::new();
                         for block in reg.lattice_blocks.values() {
                             if let crate::stateless::LatticePayload::Receive { send_block_hash, .. } = &block.payload {
                                 claimed.insert(*send_block_hash);
                             }
                         }
-                        let mut pending = Vec::new();
+                        let mut to_add = alloy_primitives::U256::ZERO;
+                        let mut to_sub = alloy_primitives::U256::ZERO;
                         for (hash, block) in &reg.lattice_blocks {
                             if let crate::stateless::LatticePayload::Send { recipient, amount } = &block.payload {
-                                if *recipient == tx.sender && !claimed.contains(hash) {
-                                    pending.push(*amount);
+                                if *recipient == tx.sender {
+                                    let is_evm_tx = block.signature.is_empty();
+                                    if is_evm_tx {
+                                        if !claimed.contains(hash) {
+                                            to_sub = to_sub.saturating_add(*amount);
+                                        }
+                                    } else {
+                                        if claimed.contains(hash) {
+                                            to_add = to_add.saturating_add(*amount);
+                                        }
+                                    }
                                 }
                             }
                         }
-                        pending.sort_by(|a, b| b.cmp(a));
-                        pending.iter().take(20).sum::<alloy_primitives::U256>()
+                        (to_add, to_sub)
                     } else {
-                        alloy_primitives::U256::ZERO
+                        (alloy_primitives::U256::ZERO, alloy_primitives::U256::ZERO)
                     };
-                    sender_acc.balance += auto_claim_amount;
+                    sender_acc.balance = sender_acc.balance.saturating_add(balance_adjustment.0).saturating_sub(balance_adjustment.1);
 
                     if sender_acc.balance < tx.value {
                         return Err(format!("Insufficient balance for {:?}", tx.sender));
@@ -812,5 +839,74 @@ mod tests {
         assert!(res.is_ok());
         assert_eq!(db.accounts.get(&sender).unwrap().balance, U256::from(800));
         assert_eq!(db.accounts.get(&recipient).unwrap().balance, U256::from(200));
+    }
+
+    #[test]
+    fn test_unclaimed_lattice_sends_cannot_be_spent() {
+        let executor = WaveExecutor::new();
+        let mut db = WitnessDatabase::default();
+        let sender = Address::repeat_byte(0xaa);
+        let recipient = Address::repeat_byte(0xbb);
+
+        db.accounts.insert(sender, AccountWitness {
+            balance: U256::from(1000),
+            nonce: 0,
+            ..Default::default()
+        });
+
+        db.accounts.insert(recipient, AccountWitness {
+            balance: U256::from(0),
+            nonce: 0,
+            ..Default::default()
+        });
+
+        let reg = crate::registry::get_registry();
+        let send_hash = alloy_primitives::B256::repeat_byte(0x01);
+        if let Ok(mut r) = reg.write() {
+            r.lattice_blocks.insert(send_hash, crate::stateless::LatticeBlock {
+                account: sender,
+                previous_hash: alloy_primitives::B256::ZERO,
+                sequence: 0,
+                payload: crate::stateless::LatticePayload::Send {
+                    recipient,
+                    amount: U256::from(200),
+                },
+                signature: vec![],
+                static_witnesses: vec![],
+            });
+        }
+
+        db.accounts.get_mut(&recipient).unwrap().balance = U256::from(200);
+
+        let tx = TxAccessList {
+            tx_index: 0,
+            sender: recipient,
+            recipient: Address::repeat_byte(0xcc),
+            value: U256::from(50),
+            nonce: 0,
+            ..Default::default()
+        };
+
+        let res = executor.execute_parallel_access_lists(&[tx.clone()], &mut db);
+        assert!(res.is_err(), "Recipient should not be able to spend unclaimed funds");
+
+        let receive_hash = alloy_primitives::B256::repeat_byte(0x02);
+        if let Ok(mut r) = reg.write() {
+            r.lattice_blocks.insert(receive_hash, crate::stateless::LatticeBlock {
+                account: recipient,
+                previous_hash: alloy_primitives::B256::ZERO,
+                sequence: 0,
+                payload: crate::stateless::LatticePayload::Receive {
+                    send_block_hash: send_hash,
+                    amount: U256::from(200),
+                },
+                signature: vec![1, 2, 3],
+                static_witnesses: vec![],
+            });
+        }
+
+        let res2 = executor.execute_parallel_access_lists(&[tx], &mut db);
+        assert!(res2.is_ok(), "Recipient should be able to spend claimed funds: {:?}", res2.err());
+        assert_eq!(db.accounts.get(&recipient).unwrap().balance, U256::from(150));
     }
 }

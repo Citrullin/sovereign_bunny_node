@@ -11,3 +11,9 @@ genesis.json
 *.log
 rustc-ice-*
 
+/wallet/target_wasm
+/wallet/www/pkg
+/wallet/pkg
+/wallet/app
+/app
+

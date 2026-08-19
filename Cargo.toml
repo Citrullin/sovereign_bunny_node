@@ -6,6 +6,7 @@ members = [
     "crates/identity",
     "crates/network",
     "crates/crypto",
+    "wallet",
 ]
 resolver = "2"
 
@@ -99,4 +100,14 @@ panic = "abort"
 strip = true
 lto = false
 incremental = false
+
+[profile.release.package.sovereign-wallet]
+opt-level = 3
+
+[profile.release.package.fips204]
+opt-level = 3
+
+[profile.release.package.fips205]
+opt-level = 3
+
 

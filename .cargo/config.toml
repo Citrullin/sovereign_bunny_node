@@ -22,3 +22,10 @@ rustflags = [
     "-C", "link-arg=-Wl,--no-keep-memory",
     "-C", "link-arg=-Wl,--strip-all",
 ]
+
+[target.wasm32-unknown-unknown]
+rustflags = [
+    "--cfg", "getrandom_backend=\"wasm_js\"",
+    "-C", "link-arg=-zstack-size=1048576",
+]
+
