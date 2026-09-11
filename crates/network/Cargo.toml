@@ -19,4 +19,6 @@ bs58 = { workspace = true }
 futures = { workspace = true }
 did-peer = { workspace = true }
 tracing = { workspace = true }
+sovereign-ssz = { path = "../sovereign-ssz" }
+blake3 = { workspace = true }
 

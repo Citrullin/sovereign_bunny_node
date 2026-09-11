@@ -2,7 +2,7 @@ use alloy_primitives::{hex, Address, B256};
 use std::collections::HashSet;
 
 /// Representation of a Universal `did:peer` Identity Document or a cross-chain `did:sovereign` document.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SovereignDidDocument {
     /// Long-form `did:peer:...` or `did:sovereign:[chain_id]:...` string.
     pub did_uri: String,
@@ -51,7 +51,11 @@ struct VerificationMethod {
 
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
 struct DidDocumentJson {
-    #[serde(rename = "verificationMethod")]
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default, rename = "blockchainAccountId")]
+    blockchain_account_id: Option<String>,
+    #[serde(default, rename = "verificationMethod")]
     verification_method: Vec<VerificationMethod>,
 }
 
@@ -403,6 +407,24 @@ impl SovereignDidDocument {
         let doc_json: DidDocumentJson = serde_json::from_str(&clean_json).ok()?;
         
         let mut evm_address_opt: Option<Address> = None;
+        if let Some(ref acc_id) = doc_json.blockchain_account_id {
+            if let Some(addr_str) = acc_id.split(':').last() {
+                if let Ok(addr) = addr_str.parse::<Address>() {
+                    evm_address_opt = Some(addr);
+                }
+            }
+        }
+        if evm_address_opt.is_none() {
+            if let Some(ref did_id) = doc_json.id {
+                if let Some(addr_str) = did_id.split(':').last() {
+                    if addr_str.starts_with("0x") {
+                        if let Ok(addr) = addr_str.parse::<Address>() {
+                            evm_address_opt = Some(addr);
+                        }
+                    }
+                }
+            }
+        }
         let mut secp256k1_pubkey = vec![];
         let mut ed25519_pubkey = vec![];
         let mut bls_pubkey = vec![];
@@ -472,9 +494,37 @@ impl SovereignDidDocument {
         }
 
         let evm_address = evm_address_opt.unwrap_or(Address::ZERO);
+
+        let (did_uri, short_form, doc_comp_opt) = if let Some(ref explicit_id) = doc_json.id {
+            let short = if explicit_id.starts_with("did:peer:4") {
+                let parts: Vec<&str> = explicit_id.split(':').collect();
+                if parts.len() >= 3 {
+                    parts[..3].join(":")
+                } else {
+                    explicit_id.clone()
+                }
+            } else {
+                explicit_id.clone()
+            };
+            (explicit_id.clone(), short, None)
+        } else {
+            let mut encoded = vec![0x80, 0x04];
+            encoded.extend_from_slice(clean_json.as_bytes());
+            let doc_comp = format!("z{}", bs58::encode(&encoded).into_string());
+
+            let hash_bytes = sovereign_crypto::hash(sovereign_crypto::HashScheme::Sha256, doc_comp.as_bytes());
+            let mut prefixed = vec![0x12, 0x20];
+            prefixed.extend_from_slice(&hash_bytes);
+            let hash_comp = format!("z{}", bs58::encode(&prefixed).into_string());
+
+            let did_uri = format!("did:peer:4{}:{}", hash_comp, doc_comp);
+            let short_form = format!("did:peer:4{}", hash_comp);
+            (did_uri, short_form, Some(doc_comp))
+        };
+
         Some(Self {
-            did_uri: String::new(),
-            short_form: String::new(),
+            did_uri,
+            short_form,
             ed25519_pubkey,
             evm_address,
             secp256k1_pubkey,
@@ -489,8 +539,213 @@ impl SovereignDidDocument {
             babyjubjub_pubkey,
             authority_path: vec![],
             trusted_authorities: HashSet::new(),
-            raw_document: Some(json_str.to_string()),
+            raw_document: doc_comp_opt,
         })
+    }
+
+    /// Serializes the `SovereignDidDocument` into a canonical W3C JSON-LD document.
+    #[must_use]
+    pub fn to_w3c_json_ld(&self) -> serde_json::Value {
+        let mut verification_methods = Vec::new();
+        let mut auth_ids = Vec::new();
+
+        if !self.secp256k1_pubkey.is_empty() {
+            let mut secp_pub = vec![0xe7, 0x01];
+            secp_pub.extend_from_slice(&self.secp256k1_pubkey);
+            let mb = format!("z{}", bs58::encode(&secp_pub).into_string());
+            let id = format!("{}#key-secp256k1", self.did_uri);
+            auth_ids.push(id.clone());
+            verification_methods.push(serde_json::json!({
+                "id": id,
+                "type": "EcdsaSecp256k1VerificationKey2019",
+                "controller": self.did_uri,
+                "publicKeyMultibase": mb,
+                "blockchainAccountId": format!("eip155:1:0x{:x}", self.evm_address)
+            }));
+        }
+
+        if !self.ed25519_pubkey.is_empty() {
+            let mut ed_pub = vec![0xed, 0x01];
+            ed_pub.extend_from_slice(&self.ed25519_pubkey);
+            let mb = format!("z{}", bs58::encode(&ed_pub).into_string());
+            let id = format!("{}#key-ed25519", self.did_uri);
+            auth_ids.push(id.clone());
+            verification_methods.push(serde_json::json!({
+                "id": id,
+                "type": "Ed25519VerificationKey2020",
+                "controller": self.did_uri,
+                "publicKeyMultibase": mb
+            }));
+        }
+
+        if !self.bls_pubkey.is_empty() {
+            let mut bls_pub = vec![0xea, 0x01];
+            bls_pub.extend_from_slice(&self.bls_pubkey);
+            let mb = format!("z{}", bs58::encode(&bls_pub).into_string());
+            let id = format!("{}#key-bls", self.did_uri);
+            verification_methods.push(serde_json::json!({
+                "id": id,
+                "type": "Bls12381G1Key2020",
+                "controller": self.did_uri,
+                "publicKeyMultibase": mb
+            }));
+        }
+
+        if !self.ml_dsa_pubkey.is_empty() {
+            let mut ml_pub = vec![0x93, 0x01];
+            ml_pub.extend_from_slice(&self.ml_dsa_pubkey);
+            let mb = format!("z{}", bs58::encode(&ml_pub).into_string());
+            let id = format!("{}#key-mldsa", self.did_uri);
+            auth_ids.push(id.clone());
+            verification_methods.push(serde_json::json!({
+                "id": id,
+                "type": "MlDsa65VerificationKey2024",
+                "controller": self.did_uri,
+                "publicKeyMultibase": mb
+            }));
+        }
+
+        if !self.slh_dsa_pubkey.is_empty() {
+            let mut slh_pub = vec![0x94, 0x01];
+            slh_pub.extend_from_slice(&self.slh_dsa_pubkey);
+            let mb = format!("z{}", bs58::encode(&slh_pub).into_string());
+            let id = format!("{}#key-slhdsa", self.did_uri);
+            verification_methods.push(serde_json::json!({
+                "id": id,
+                "type": "SlhDsaSha2128fVerificationKey2024",
+                "controller": self.did_uri,
+                "publicKeyMultibase": mb
+            }));
+        }
+
+        if !self.falcon_pubkey.is_empty() {
+            let mut fal_pub = vec![0x92, 0x01];
+            fal_pub.extend_from_slice(&self.falcon_pubkey);
+            let mb = format!("z{}", bs58::encode(&fal_pub).into_string());
+            let id = format!("{}#key-falcon", self.did_uri);
+            verification_methods.push(serde_json::json!({
+                "id": id,
+                "type": "Falcon512VerificationKey2024",
+                "controller": self.did_uri,
+                "publicKeyMultibase": mb
+            }));
+        }
+
+        if !self.xmss_pubkey.is_empty() {
+            let mut xmss_pub = vec![0x95, 0x01];
+            xmss_pub.extend_from_slice(&self.xmss_pubkey);
+            let mb = format!("z{}", bs58::encode(&xmss_pub).into_string());
+            let id = format!("{}#key-xmss", self.did_uri);
+            verification_methods.push(serde_json::json!({
+                "id": id,
+                "type": "XmssSha2256VerificationKey2024",
+                "controller": self.did_uri,
+                "publicKeyMultibase": mb
+            }));
+        }
+
+        if !self.secp256k1_schnorr_pubkey.is_empty() {
+            let mut schnorr_pub = vec![0xe8, 0x01];
+            schnorr_pub.extend_from_slice(&self.secp256k1_schnorr_pubkey);
+            let mb = format!("z{}", bs58::encode(&schnorr_pub).into_string());
+            let id = format!("{}#key-schnorr", self.did_uri);
+            verification_methods.push(serde_json::json!({
+                "id": id,
+                "type": "EcdsaSecp256k1SchnorrVerificationKey2025",
+                "controller": self.did_uri,
+                "publicKeyMultibase": mb
+            }));
+        }
+
+        if !self.secp256r1_pubkey.is_empty() {
+            let mut r1_pub = vec![0xe9, 0x01];
+            r1_pub.extend_from_slice(&self.secp256r1_pubkey);
+            let mb = format!("z{}", bs58::encode(&r1_pub).into_string());
+            let id = format!("{}#key-secp256r1", self.did_uri);
+            verification_methods.push(serde_json::json!({
+                "id": id,
+                "type": "EcdsaSecp256r1VerificationKey2020",
+                "controller": self.did_uri,
+                "publicKeyMultibase": mb
+            }));
+        }
+
+        if !self.pasta_pubkey.is_empty() {
+            let mut pasta_pub = vec![0x90, 0x01];
+            pasta_pub.extend_from_slice(&self.pasta_pubkey);
+            let mb = format!("z{}", bs58::encode(&pasta_pub).into_string());
+            let id = format!("{}#key-pasta", self.did_uri);
+            verification_methods.push(serde_json::json!({
+                "id": id,
+                "type": "PastaVerificationKey2024",
+                "controller": self.did_uri,
+                "publicKeyMultibase": mb
+            }));
+        }
+
+        if !self.babyjubjub_pubkey.is_empty() {
+            let mut baby_pub = vec![0x91, 0x01];
+            baby_pub.extend_from_slice(&self.babyjubjub_pubkey);
+            let mb = format!("z{}", bs58::encode(&baby_pub).into_string());
+            let id = format!("{}#key-babyjubjub", self.did_uri);
+            verification_methods.push(serde_json::json!({
+                "id": id,
+                "type": "BabyJubjubVerificationKey2024",
+                "controller": self.did_uri,
+                "publicKeyMultibase": mb
+            }));
+        }
+
+        serde_json::json!({
+            "@context": [
+                "https://www.w3.org/ns/did/v1",
+                "https://w3id.org/security/suites/ed25519-2020/v1",
+                "https://w3id.org/security/suites/jws-2020/v1"
+            ],
+            "id": self.did_uri,
+            "alsoKnownAs": [format!("ethereum:0x{:x}", self.evm_address)],
+            "verificationMethod": verification_methods,
+            "authentication": auth_ids,
+            "assertionMethod": auth_ids,
+            "capabilityInvocation": auth_ids,
+            "capabilityDelegation": auth_ids
+        })
+    }
+
+    /// Converts the DID document to an immutable IPLD block.
+    ///
+    /// # Errors
+    /// Returns an error if serialization fails.
+    pub fn to_ipld_block(&self, codec: crate::ipld::IpldCodec) -> Result<crate::ipld::IpldBlock, String> {
+        let json_val = self.to_w3c_json_ld();
+        let bytes = serde_json::to_vec(&json_val).map_err(|e| format!("Serialization error: {e}"))?;
+        Ok(crate::ipld::IpldBlock::new(codec, crate::ipld::HashCodec::Blake3, bytes))
+    }
+
+    /// Resolves a `SovereignDidDocument` from an IPLD block.
+    ///
+    /// # Errors
+    /// Returns an error if integrity check or parsing fails.
+    pub fn from_ipld_block(block: &crate::ipld::IpldBlock) -> Result<Self, String> {
+        if !block.verify_integrity() {
+            return Err("IPLD Block integrity verification failed".to_string());
+        }
+        let json_str = String::from_utf8(block.raw_data.clone())
+            .map_err(|e| format!("UTF-8 decode error: {e}"))?;
+        Self::from_json_string(&json_str)
+            .ok_or_else(|| "Failed to parse SovereignDidDocument from IPLD JSON-LD payload".to_string())
+    }
+
+    /// Computes the canonical BLAKE3 `dag-json` CIDv1 of this DID document.
+    #[must_use]
+    pub fn cid(&self) -> crate::ipld::CidV1 {
+        let json_val = self.to_w3c_json_ld();
+        let bytes = serde_json::to_vec(&json_val).unwrap_or_default();
+        crate::ipld::CidV1::from_data(
+            crate::ipld::IpldCodec::DagJson,
+            crate::ipld::HashCodec::Blake3,
+            &bytes,
+        )
     }
 }
 
@@ -541,5 +796,55 @@ mod tests {
         assert_eq!(doc.did_uri, did);
         assert_eq!(doc.short_form, "9858effd232b4033e47d90003d41ec34ecaeda94");
         assert_eq!(doc.evm_address, "0x9858effd232b4033e47d90003d41ec34ecaeda94".parse::<Address>().unwrap());
+    }
+
+    #[test]
+    fn test_w3c_json_ld_serialization() {
+        let seed = B256::repeat_byte(0x77);
+        let doc = SovereignDidDocument::derive_from_seed(seed);
+        let json_ld = doc.to_w3c_json_ld();
+
+        // 1. Verify JSON-LD top-level structure
+        assert!(json_ld.get("@context").is_some());
+        assert_eq!(json_ld.get("id").unwrap().as_str().unwrap(), doc.did_uri);
+
+        // 2. Verify verification methods array contains active keys
+        let vms = json_ld.get("verificationMethod").unwrap().as_array().unwrap();
+        assert_eq!(vms.len(), 11, "Should contain all 11 curve verification methods");
+
+        // 3. Verify authentication and assertion lists
+        let auths = json_ld.get("authentication").unwrap().as_array().unwrap();
+        assert!(!auths.is_empty());
+    }
+
+    #[test]
+    fn test_ipld_block_did_round_trip() {
+        let seed = B256::repeat_byte(0x88);
+        let doc = SovereignDidDocument::derive_from_seed(seed);
+
+        // 1. Convert to IPLD Block
+        let block = doc.to_ipld_block(crate::ipld::IpldCodec::DagJson).unwrap();
+        assert!(block.verify_integrity());
+        assert_eq!(block.cid.codec, crate::ipld::IpldCodec::DagJson);
+        assert_eq!(block.cid.hash.code, crate::ipld::HashCodec::Blake3);
+
+        // 2. Check canonical CID string
+        let cid_str = block.cid.to_base32();
+        assert!(cid_str.starts_with('b'));
+
+        // 3. Resolve from IPLD Block
+        let resolved = SovereignDidDocument::from_ipld_block(&block).unwrap();
+        assert_eq!(resolved.evm_address, doc.evm_address);
+        assert_eq!(resolved.secp256k1_pubkey, doc.secp256k1_pubkey);
+        assert_eq!(resolved.ed25519_pubkey, doc.ed25519_pubkey);
+    }
+
+    #[test]
+    fn test_did_canonical_cid() {
+        let seed = B256::repeat_byte(0x99);
+        let doc = SovereignDidDocument::derive_from_seed(seed);
+        let cid = doc.cid();
+        assert_eq!(cid.codec, crate::ipld::IpldCodec::DagJson);
+        assert!(cid.to_base32().starts_with('b'));
     }
 }

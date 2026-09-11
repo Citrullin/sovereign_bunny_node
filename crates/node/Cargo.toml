@@ -1,11 +1,12 @@
 [package]
 name = "sovereign-node"
+default-run = "sovereign-bunny"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 
 [[bin]]
-name = "sovereign-reth"
+name = "sovereign-bunny"
 path = "src/main.rs"
 
 [[bin]]
@@ -24,6 +25,7 @@ futures = { workspace = true }
 alloy-primitives = { workspace = true }
 reqwest = { version = "0.12", features = ["json"] }
 alloy-consensus = { workspace = true }
+alloy-eips = { workspace = true }
 alloy-rlp = "0.3"
 k256 = { workspace = true }
 blake3 = { workspace = true }
@@ -56,6 +58,7 @@ sovereign-attestation = { workspace = true }
 sovereign-identity = { workspace = true }
 sovereign-network = { workspace = true }
 sovereign-crypto = { path = "../crypto" }
+sovereign-ssz = { path = "../sovereign-ssz" }
 toml = { workspace = true }
 bs58 = { workspace = true }
 ed25519-dalek = { workspace = true }

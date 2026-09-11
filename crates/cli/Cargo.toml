@@ -1,0 +1,49 @@
+[package]
+name = "bunny-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[lib]
+name = "bunny_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "bunny"
+path = "src/main.rs"
+
+[dependencies]
+alloy-primitives = { workspace = true }
+alloy-consensus = { workspace = true }
+alloy-eips = { workspace = true }
+alloy-rlp = "0.3"
+koral-verify = { path = "../koral-verify" }
+sovereign-identity = { path = "../identity" }
+sovereign-ssz = { path = "../sovereign-ssz" }
+sovereign-consensus = { path = "../consensus" }
+sovereign-iggy-ctrl = { path = "../iggy-ctrl" }
+sovereign-execution = { path = "../execution" }
+scale = { workspace = true }
+ssz_rs = "0.9.0"
+eyre = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = "0.4"
+blake3 = { workspace = true }
+bytes = "1.6"
+sovereign-attestation = { path = "../attestation" }
+sovereign-crypto = { path = "../crypto" }
+reqwest = { version = "0.12", features = ["json"] }
+did-peer = { workspace = true }
+k256 = { workspace = true }
+bs58 = { workspace = true }
+bip39 = "2.0.0"
+
+[dev-dependencies]
+tempfile = "3.10"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+

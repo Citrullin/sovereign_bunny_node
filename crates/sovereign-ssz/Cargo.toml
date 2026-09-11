@@ -1,0 +1,15 @@
+[package]
+name = "sovereign-ssz"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+alloy-primitives = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+ssz_rs = "0.9.0"
+tiny-keccak = { workspace = true }
+
+[dev-dependencies]
+hex = "0.4"

@@ -9,6 +9,19 @@ pub mod zkp_auth;
 pub mod namespace;
 /// Decentralized Identifier (DID) management module.
 pub mod did;
+/// Universal IPLD, Multicodec, CIDv1, and W3C JSON-LD / WoT module.
+pub mod ipld;
+/// W3C ActivityStreams 2.0 JSON-LD & ActivityPub transcoder.
+pub mod activitypub_ld;
+/// Multi-Tiered ZK-Merit & Delegated Ephemeral Sessions.
+pub mod zk_merit;
+/// Extensible Protocol Plugin Registry & Decentralized Git.
+pub mod protocol_plugin;
+
+pub use ipld::{CidV1, HashCodec, IpldBlock, IpldCodec, Multihash, WotThingDescription};
+pub use activitypub_ld::{ActivityPubActor, ActivityStreamsActivity};
+pub use zk_merit::{DelegatedEphemeralSession, GovernanceTier, ZkMeritProof};
+pub use protocol_plugin::{GitIpldCommit, ProtocolHandler, ProtocolPluginRegistry};
 
 /// The supported key types in DID Peer 4.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

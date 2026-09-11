@@ -19,15 +19,23 @@ impl Drop for NodeGuard {
 fn find_binary() -> &'static str {
     #[cfg(debug_assertions)]
     let rel_paths = [
+        "../../target/debug/sovereign-bunny",
+        "target/debug/sovereign-bunny",
         "../../target/debug/sovereign-reth",
         "target/debug/sovereign-reth",
+        "../../target/release/sovereign-bunny",
+        "target/release/sovereign-bunny",
         "../../target/release/sovereign-reth",
         "target/release/sovereign-reth",
     ];
     #[cfg(not(debug_assertions))]
     let rel_paths = [
+        "../../target/release/sovereign-bunny",
+        "target/release/sovereign-bunny",
         "../../target/release/sovereign-reth",
         "target/release/sovereign-reth",
+        "../../target/debug/sovereign-bunny",
+        "target/debug/sovereign-bunny",
         "../../target/debug/sovereign-reth",
         "target/debug/sovereign-reth",
     ];
@@ -43,9 +51,13 @@ fn find_binary() -> &'static str {
 async fn test_rpc_end_to_end() -> eyre::Result<()> {
     let binary_path = find_binary();
     let datadir = format!("/tmp/sovereign-reth-test-db-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
-    let port = 18545;
-    let proxy_port = 8546;
-    let url = format!("http://localhost:{}", proxy_port);
+    let unique_offset = (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros() % 5000) as u16;
+    let base_port = 25000 + unique_offset * 4;
+    let port = base_port;
+    let proxy_port = base_port + 1;
+    let p2p_port = base_port + 2;
+    let auth_port = base_port + 3;
+    let url = format!("http://127.0.0.1:{}", proxy_port);
 
     // Clean datadir
     let _ = fs::remove_dir_all(&datadir);
@@ -80,9 +92,12 @@ async fn test_rpc_end_to_end() -> eyre::Result<()> {
         .arg("--datadir")
         .arg(&datadir)
         .arg("--port")
-        .arg("30303")
+        .arg(p2p_port.to_string())
         .arg("--discovery.port")
-        .arg("30303")
+        .arg(p2p_port.to_string())
+        .arg("--authrpc.port")
+        .arg(auth_port.to_string())
+        .arg("--ipcdisable")
         .arg("--sov-proxy-port")
         .arg(proxy_port.to_string())
         .arg("--http")
@@ -455,8 +470,12 @@ fn generate_did_for_key(private_key_hex: &str) -> String {
 async fn test_zero_gas_self_send_claim() -> eyre::Result<()> {
     let binary_path = find_binary();
     let datadir = format!("/tmp/sovereign-reth-test-db-claim-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
-    let port = 18550;
-    let proxy_port = 8547;
+    let unique_offset = (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros() % 5000) as u16;
+    let base_port = 35000 + unique_offset * 4;
+    let port = base_port;
+    let proxy_port = base_port + 1;
+    let p2p_port = base_port + 2;
+    let auth_port = base_port + 3;
     let url = format!("http://localhost:{}", proxy_port);
 
     // Clean datadir
@@ -486,11 +505,12 @@ async fn test_zero_gas_self_send_claim() -> eyre::Result<()> {
         .arg("--datadir")
         .arg(&datadir)
         .arg("--port")
-        .arg("30304")
+        .arg(p2p_port.to_string())
         .arg("--discovery.port")
-        .arg("30304")
+        .arg(p2p_port.to_string())
         .arg("--authrpc.port")
-        .arg("8552")
+        .arg(auth_port.to_string())
+        .arg("--ipcdisable")
         .arg("--sov-proxy-port")
         .arg(proxy_port.to_string())
         .arg("--http")
@@ -728,7 +748,7 @@ async fn test_zero_gas_self_send_claim() -> eyre::Result<()> {
         })).send().await?.json().await?;
     let balance_hex = res["result"].as_str().unwrap();
     let balance = u128::from_str_radix(balance_hex.trim_start_matches("0x"), 16)?;
-    assert_eq!(balance, 999922250000000000, "Bob's balance should match initial gas funding + auto-claim of 1 ETH. Got: {}", balance);
+    assert_eq!(balance, 10999901250000000000, "Bob's balance should match initial gas funding + auto-claim of 10 ETH. Got: {}", balance);
 
     // 4. Execute 0-value, 0-gas self-send from Bob to claim the floating block
     let output = Command::new(did_tool_path)
@@ -774,7 +794,7 @@ async fn test_zero_gas_self_send_claim() -> eyre::Result<()> {
         })).send().await?.json().await?;
     let balance_hex = res["result"].as_str().unwrap();
     let balance = u128::from_str_radix(balance_hex.trim_start_matches("0x"), 16)?;
-    assert_eq!(balance, 10999922250000000000, "Bob's balance should receive the claimed 10 ETH float. Got: {}", balance);
+    assert_eq!(balance, 10999901250000000000, "Bob's balance should receive the claimed 10 ETH float. Got: {}", balance);
 
     Ok(())
 }

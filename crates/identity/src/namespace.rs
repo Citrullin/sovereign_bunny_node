@@ -12,6 +12,8 @@ pub struct NamespaceRegistry {
     pub did_names: HashMap<String, Vec<String>>,
     /// Maps a DID to its active stake amount for namespace protection.
     pub stakes: HashMap<String, u64>,
+    /// Maps a DID to its recorded reputation score.
+    pub reputations: HashMap<String, f64>,
 }
 
 impl NamespaceRegistry {
@@ -60,14 +62,16 @@ impl NamespaceRegistry {
     ///
     /// Returns `true` if registration succeeded (either fresh or via winning conflict resolution).
     pub fn register(&mut self, name: String, challenger_did: String, challenger_reputation: f64, stake: u64) -> bool {
+        self.reputations.insert(challenger_did.clone(), challenger_reputation);
+
         if let Some(current_owner) = self.names.get(&name).cloned() {
             if current_owner == challenger_did {
                 // Already owned by the challenger.
                 return true;
             }
 
-            // Conflict resolution.
-            let owner_reputation = 1.0; // Mock current owner reputation
+            // Conflict resolution using recorded owner reputation.
+            let owner_reputation = self.reputations.get(&current_owner).copied().unwrap_or(1.0);
             let owner_stake = self.stakes.get(&current_owner).copied().unwrap_or(0);
             
             let owner_score = self.calculate_score(&current_owner, owner_reputation, owner_stake);

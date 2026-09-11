@@ -1,0 +1,55 @@
+[package]
+name = "sovereign-execution"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+eyre = { workspace = true }
+tracing = { workspace = true }
+futures = { workspace = true }
+alloy-primitives = { workspace = true }
+alloy-consensus = { workspace = true }
+alloy-eips = { workspace = true }
+revm-primitives = { workspace = true }
+revm-state = { workspace = true }
+revm-bytecode = { workspace = true }
+revm-database-interface = { workspace = true }
+revm = { workspace = true }
+
+reth-node-api = { workspace = true }
+reth-node-builder = { workspace = true }
+reth-ethereum = { workspace = true }
+reth-ethereum-primitives = { workspace = true }
+reth-provider = { workspace = true }
+reth-transaction-pool = { workspace = true }
+reth-primitives-traits = { workspace = true }
+reth-chainspec = { workspace = true }
+nmt-rs = { workspace = true }
+boringtun = { workspace = true }
+scale = { workspace = true }
+k256 = { workspace = true }
+ed25519-dalek = { workspace = true }
+sovereign-consensus = { path = "../consensus" }
+sovereign-ssz = { path = "../sovereign-ssz" }
+sovereign-attestation = { path = "../attestation" }
+sovereign-identity = { path = "../identity" }
+sovereign-crypto = { path = "../crypto" }
+did-peer = { workspace = true }
+bs58 = { workspace = true }
+fips204 = { workspace = true }
+tiny-keccak = { workspace = true }
+
+c-kzg = "2.1.8"
+reqwest = { version = "0.12", features = ["json"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rand = "0.8"
+rand_chacha = "0.3"
+
+[dev-dependencies]
+serial_test = "3.1"
+
+[features]
+test-utils = []

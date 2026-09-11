@@ -1,13 +1,20 @@
 [workspace]
 members = [
-    "crates/node",
+    "crates/cli",
     "crates/consensus",
     "crates/attestation",
     "crates/identity",
     "crates/network",
     "crates/crypto",
+    "crates/execution",
+    "crates/sovereign-ssz",
+    "crates/iggy-ctrl",
+    "crates/koral-verify",
+    "crates/node",
     "wallet",
+    "tests/cluster",
 ]
+default-members = ["crates/cli"]
 resolver = "2"
 
 [workspace.package]
@@ -31,6 +38,7 @@ revm-primitives = "41.0.0"
 revm-state = "41.0.0"
 revm-bytecode = "41.0.0"
 revm-database-interface = "41.0.0"
+revm = { version = "41.0.0", default-features = false, features = ["std", "secp256k1", "serde"] }
 
 # Reth dependencies
 reth-node-api = { git = "https://github.com/paradigmxyz/reth", tag = "v2.4.0" }
@@ -50,6 +58,7 @@ reth-cli-util = { git = "https://github.com/paradigmxyz/reth", tag = "v2.4.0" }
 # Ecosystem dependencies
 did-peer = "0.7.5"
 k256 = "0.14.0"
+hex = "0.4"
 ed25519-dalek = "3.0.0"
 boringtun = "0.7.1"
 nmt-rs = "0.2.5"
@@ -94,11 +103,11 @@ codegen-units = 1
 incremental = false
 
 [profile.release]
-opt-level = 0
+opt-level = 3
 codegen-units = 1
 panic = "abort"
 strip = true
-lto = false
+lto = "thin"
 incremental = false
 
 [profile.release.package.sovereign-wallet]

@@ -6,6 +6,8 @@
 #![warn(missing_docs)]
 #![warn(clippy::all)]
 
+pub mod toy_mode;
+
 use serde::{Deserialize, Serialize};
 
 /// Signature and verification algorithms supported across profiles.

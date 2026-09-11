@@ -70,8 +70,22 @@ fi
 
 echo "=== Step 1: Compiling Smart Contracts ==="
 cd contracts
-npm install
-node compile.js
+mkdir -p out
+if [ ! -d "node_modules/solc" ]; then
+  if [ -f "src/SimplePaymaster.runtime.bin" ]; then
+    echo "Using vendored SimplePaymaster runtime bytecode..."
+    cp src/SimplePaymaster.runtime.bin out/SimplePaymaster.runtime.bin
+  else
+    echo "Installing contracts dependencies (solc)..."
+    npm install --prefer-offline --no-audit --no-fund 2>/dev/null || npm install --no-audit --no-fund || true
+  fi
+fi
+
+if [ -d "node_modules/solc" ]; then
+  node compile.js
+elif [ -f "src/SimplePaymaster.runtime.bin" ] && [ ! -f "out/SimplePaymaster.runtime.bin" ]; then
+  cp src/SimplePaymaster.runtime.bin out/SimplePaymaster.runtime.bin
+fi
 cd ..
 
 echo "=== Step 2: Generating Genesis Configuration ==="

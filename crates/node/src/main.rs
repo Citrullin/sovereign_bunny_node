@@ -24,6 +24,9 @@ pub mod config;
 /// CAIP-RPC proxy module.
 pub mod caip_rpc;
 
+/// Subsystem RPC handlers (CAIP, zkCompliance, State, Server).
+pub mod rpc;
+
 use sovereign_consensus::SovereignPoolBuilder;
 use clap::Parser;
 
@@ -77,6 +80,14 @@ pub struct SovereignArgs {
     /// Port on which the CAIP-RPC proxy listens
     #[arg(long = "sov-proxy-port", default_value_t = 8546)]
     pub sov_proxy_port: u16,
+
+    /// Toy mode flag (downgrades cryptographic parameters for rapid development/testing)
+    #[arg(long = "toy-mode", default_value_t = false)]
+    pub toy_mode: bool,
+
+    /// Native currency ticker symbol (default: TBL)
+    #[arg(long = "sov-ticker", default_value = "TBL")]
+    pub sov_ticker: String,
 }
 
 impl Default for SovereignArgs {
@@ -94,6 +105,8 @@ impl Default for SovereignArgs {
             sov_crypto_profile: None,
             sov_parallel_engine: None,
             sov_proxy_port: 8546,
+            toy_mode: false,
+            sov_ticker: "TBL".to_string(),
         }
     }
 }
@@ -163,7 +176,7 @@ async fn sovereign_exex<N: FullNodeComponents>(
                         if !should_execute {
                             if let Ok(reg) = registry_lock.read() {
                                 if let Some(actor) = reg.actors.values().find(|a| alloy_primitives::Address::from_slice(&a.actor_id[0..20]) == to) {
-                                    resolved_to = sovereign_consensus::system_registry::SYSTEM_ACTUATOR;
+                                    resolved_to = sovereign_consensus::system_registry::SYSTEM_ASYNC_INBOX;
                                     let mut temp = actor.actor_id.to_vec();
                                     temp.extend_from_slice(tx.input());
                                     resolved_calldata = temp;
@@ -193,13 +206,25 @@ async fn sovereign_exex<N: FullNodeComponents>(
                 }
 
                 // Sovereign Epoch Consensus Ticking
+                //
+                // TODO(Phase 7b): The epoch boundary is NOT determined by block count.
+                // The correct trigger is receipt of a threshold-signed `ThresholdEpochMarker`
+                // from the sub-committee. This block-modulo logic is a temporary dev
+                // placeholder that MUST be replaced before mainnet.
+                //
+                // Correct model:
+                //   1. Sub-committee completes >= min_paxos_slots Multi-Paxos slots.
+                //   2. Sub-committee co-signs ThresholdEpochMarker via (t,n) BLS.
+                //   3. Node receives the marker via P2P gossip.
+                //   4. Node calls finalize_epoch() upon verifying the threshold signature.
+                //
+                // For now: fire on every new canonical tip as a stub (epoch_id = tip number).
                 if let Ok(mut reg) = registry_lock.write() {
-                    let epoch_length = reg.static_cfg.epoch.epoch_length;
+                    // Placeholder: treat each block as a potential epoch trigger only in dev/toy mode.
+                    // In production, this branch is replaced by the ThresholdEpochMarker handler.
                     let block_number = tip.number();
-                    if block_number > 0 && block_number % epoch_length == 0 {
-                        let epoch_id = block_number / epoch_length;
-                        info!("Epoch boundary reached: epoch #{}. Finalizing epoch consensus...", epoch_id);
-                        
+                    if block_number > 0 {
+                        let epoch_id = block_number; // placeholder: 1 epoch per block in dev
                         let consensus_root = tip.hash();
                         let state_root = tip.state_root();
                         let checkpoint = sovereign_consensus::epoch_engine::finalize_epoch(
@@ -208,8 +233,12 @@ async fn sovereign_exex<N: FullNodeComponents>(
                             consensus_root,
                             state_root,
                         );
-                        info!("Epoch checkpoint #{} finalized successfully! Consensus root: {:?}, Snapshot hash: {:?}", 
-                            epoch_id, checkpoint.consensus_root, checkpoint.snapshot_hash);
+                        tracing::debug!(
+                            epoch_id,
+                            ?consensus_root,
+                            ?checkpoint.snapshot_hash,
+                            "[DEV PLACEHOLDER] epoch finalized on block tip (not marker-driven)"
+                        );
                     }
                 }
             }
@@ -225,7 +254,7 @@ async fn sovereign_exex<N: FullNodeComponents>(
 fn main() {
     reth_cli_util::sigsegv_handler::install();
 
-    // RUST_BACKTRACE can be set externally: `RUST_BACKTRACE=1 sovereign-reth`
+    // RUST_BACKTRACE can be set externally: `RUST_BACKTRACE=1 bunny`
     // Avoid unsafe env::set_var which is unsound in multi-threaded contexts.
 
     // Enable Parallel EVM (Block-STM) execution natively
@@ -267,8 +296,7 @@ fn main() {
         }
 
         if let Some(block_time) = args.sov_block_time {
-            static_cfg.epoch.block_time_ms = block_time;
-            info!("Configured block time from CLI: {}ms", block_time);
+            info!("Configured target virtual block time from CLI: {}ms", block_time);
         }
 
         if let Some(profile) = args.sov_crypto_profile.clone() {
@@ -284,8 +312,29 @@ fn main() {
         let dynamic_cfg_arc = std::sync::Arc::new(std::sync::RwLock::new(dynamic_cfg));
         let _ = sovereign_consensus::registry::init_registry(static_cfg, dynamic_cfg_arc);
 
+        // Auto-register operator identity if provided via CLI flag
+        if let Some(ref did_str) = args.sov_did_peer4 {
+            let reg_lock = sovereign_consensus::registry::get_registry();
+            if let Ok(mut reg) = reg_lock.write() {
+                let _ = reg.register_user_did(did_str.clone());
+                if args.sov_node_type.eq_ignore_ascii_case("validator") {
+                    reg.validators.insert(did_str.clone(), sovereign_consensus::registry::ValidatorType::HardwareTEE);
+                    reg.reputation.insert(did_str.clone(), 0.90);
+                    if let Some(addr) = reg.get_address_by_did(did_str) {
+                        reg.validators.insert(format!("{addr:#x}"), sovereign_consensus::registry::ValidatorType::HardwareTEE);
+                    }
+                }
+                info!("Registered operator DID from CLI: {did_str}");
+            }
+        }
+
+        if args.toy_mode || std::env::var("SOVEREIGN_TOY_MODE").is_ok() {
+            eprintln!("{}", sovereign_crypto::toy_mode::TOY_MODE_WARNING);
+            info!("⚠️ Running in TOY MODE — reduced security parameters active");
+        }
+
         let proxy_port = args.sov_proxy_port;
-        let is_dev = std::env::args().any(|arg| arg == "--dev");
+        let is_dev = std::env::args().any(|arg| arg == "--dev" || arg == "--toy-mode") || args.toy_mode;
 
         if is_dev {
             info!("Launching Sovereign Reth Node in DEV mode (Auto-Mining)");
@@ -305,6 +354,22 @@ fn main() {
             let chain_id = handle.node.chain_spec().chain.id();
             let _ = tokio::spawn(caip_rpc::run_proxy(proxy_port, reth_port, chain_id));
             info!("🚀 Spawned CAIP-RPC proxy on port {proxy_port} forwarding to Reth on port {reth_port}");
+
+            // Continuous background epoch progression loop (tick-driven)
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_millis(2500));
+                loop {
+                    interval.tick().await;
+                    let reg_lock = sovereign_consensus::registry::get_registry();
+                    if let Ok(mut reg) = reg_lock.write() {
+                        let next_epoch = reg.current_epoch + 1;
+                        let consensus_root = alloy_primitives::B256::from_slice(blake3::hash(&next_epoch.to_be_bytes()).as_bytes());
+                        let state_root = alloy_primitives::B256::from_slice(blake3::hash(consensus_root.as_slice()).as_bytes());
+                        sovereign_consensus::epoch_engine::finalize_epoch(&mut reg, next_epoch, consensus_root, state_root);
+                        reg.current_block = next_epoch;
+                    }
+                }
+            });
             
             handle.wait_for_node_exit().await
         } else {
@@ -350,9 +415,8 @@ temporal_decay_gamma = 0.01
 temporal_decay_delta_r = 0.02
 
 [static_cfg.epoch]
-epoch_length = 500000
-publishing_window = 1000
-block_time_ms = 2000
+min_paxos_slots = 5
+publishing_window_epochs = 2
 
 [static_cfg.das]
 required_samples = 32
@@ -387,9 +451,8 @@ connectivity_decay_penalty = 0.10
         assert_eq!(config.static_cfg.pagerank.max_iterations, 100);
         assert_eq!(config.static_cfg.pagerank.temporal_decay_gamma, 0.01);
         assert_eq!(config.static_cfg.pagerank.temporal_decay_delta_r, 0.02);
-        assert_eq!(config.static_cfg.epoch.epoch_length, 500000);
-        assert_eq!(config.static_cfg.epoch.publishing_window, 1000);
-        assert_eq!(config.static_cfg.epoch.block_time_ms, 2000);
+        assert_eq!(config.static_cfg.epoch.min_paxos_slots, 5);
+        assert_eq!(config.static_cfg.epoch.publishing_window_epochs, 2);
         assert_eq!(config.static_cfg.das.required_samples, 32);
         assert_eq!(config.static_cfg.das.max_attempts, 500);
 

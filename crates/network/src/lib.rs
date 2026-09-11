@@ -9,3 +9,7 @@ pub mod handshake;
 pub mod wireguard;
 pub mod das;
 pub mod xroad;
+/// Address Interest Signaling Swarm and Guarded Bus module.
+pub mod signal_swarm;
+
+pub use signal_swarm::{CompressedCuckooFilter, GuardedBus, SignalTopicSwarm};
