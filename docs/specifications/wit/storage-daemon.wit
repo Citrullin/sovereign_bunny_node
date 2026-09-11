@@ -1,0 +1,32 @@
+// WASI WIT Interface Definition for Storage & Proof of Retrievability (ZK-PoR) Daemon
+package bunny:storage@0.1.0;
+
+interface archival {
+    record storage-cid {
+        multihash: list<u8>,
+        size-bytes: u64,
+        nmt-sector: u32,
+    }
+
+    record por-proof {
+        cid: list<u8>,
+        bao-outboard-slice: list<u8>,
+        verified: bool,
+    }
+
+    /// Partitions sector blobs into Namespaced Merkle Trees and pins to local IPFS/Iroh store.
+    pin-sector-blob: func(
+        namespace-id: u32,
+        payload: list<u8>
+    ) -> result<storage-cid, string>;
+
+    /// Generates or verifies a BLAKE3 Bao verified streaming Proof of Retrievability.
+    verify-retrievability: func(
+        cid: list<u8>,
+        proof: por-proof
+    ) -> result<bool, string>;
+}
+
+world storage-worker {
+    export archival;
+}

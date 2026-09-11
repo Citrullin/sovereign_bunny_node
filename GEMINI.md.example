@@ -1,0 +1,53 @@
+# sovereign-reth — Agent Context Rules Template
+# Copy this file to `GEMINI.md` or `AGENTS.md` in your local environment.
+
+## Source Layout
+
+This is a Rust workspace. All editable source lives under `crates/`, `wallet/src/`,
+`wallet/ts/`, `tests/`, `contracts/src/`, `docs/`, `specs/`, and `scripts/`.
+Everything else is either generated, a local runtime artifact, or an external dependency.
+
+## Excluded from scanning
+
+Never scan, list, or load the following into context — they are build artifacts
+or external dependencies with no editable source content:
+
+| Path | Reason |
+|------|--------|
+| `target/` | Cargo build artifacts |
+| `wallet/target_wasm/` | wasm-pack compilation output |
+| `wallet/www/pkg/` | generated wasm-pack JS/WASM output |
+| `wallet/pkg/` | wasm-pack staging output |
+| `wallet/app/` | bundled frontend output |
+| `wallet/dist/` | compiled TypeScript output |
+| `wallet/node_modules/` | wallet TypeScript NPM deps |
+| `tests/cluster/dist/` | compiled cluster test TypeScript output |
+| `contracts/node_modules/` | Solidity toolchain NPM deps |
+| `contracts/out/` | Forge compiled artifacts |
+| `tests/e2e/node_modules/` | E2E test runner NPM deps |
+| `docs/book/` | mdBook compiled documentation |
+| `db/`, `db1/`, `db2/` | live RocksDB/MDBX node databases |
+| `*.log` | node runtime logs |
+| `*.hex` | key files |
+| `rustc-ice-*` | compiler crash dumps |
+| `Cargo.lock` | auto-generated dependency lock file |
+
+## Load on demand only
+
+Only load the following when the user explicitly asks about them:
+
+- `proposals/` — design document drafts and archives
+- `gramine/` — SGX manifest and enclave build files
+
+## Crate naming (for context)
+
+The main crates are:
+
+- `crates/node` — binary entry point + RPC
+- `crates/cli` — microservice daemons (gateway, committee, demux)
+- `crates/consensus` — Snow family consensus, epoch engine, block-lattice pool
+- `crates/identity` — DID resolution, zkp_auth, delegation, W3C ActivityPub
+- `crates/attestation` — SGX attestation pipeline
+- `crates/network` — P2P networking, DAS, WireGuard, signal swarm
+- `crates/crypto` — cryptographic profiles and signature schemes (ML-DSA, Falcon, Secp256k1)
+- `wallet/` — WASM wallet & TypeScript SDK (EIP-8141 envelope, debugger, CAIP-25)

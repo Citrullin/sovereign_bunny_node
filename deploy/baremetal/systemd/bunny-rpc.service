@@ -1,0 +1,15 @@
+[Unit]
+Description=Sovereign Bunny EVM Read-Path RPC Proxy (sovereign-alpha)
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/bunny-rpc --port 8546 --reth-url http://127.0.0.1:8545
+Restart=always
+RestartSec=3
+Environment="RUST_LOG=info"
+
+[Install]
+WantedBy=multi-user.target

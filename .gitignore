@@ -15,5 +15,38 @@ rustc-ice-*
 /wallet/www/pkg
 /wallet/pkg
 /wallet/app
+/wallet/dist
+/wallet/node_modules
+/tests/cluster/dist
 /app
+node_modules/
+dist/
+*.tsbuildinfo
+.turbo/
+.cache/
 
+# Documentation build output
+/docs/book/
+
+# LLM agent context & editor environments (copy *.example for local use)
+GEMINI.md
+AGENTS.md
+CLAUDE.md
+.agents/
+.gemini/
+.cursor/
+.windsurf/
+
+# Environment files & local overrides
+.env
+.env.*
+*.env
+*.local
+
+# IDE & OS metadata
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store

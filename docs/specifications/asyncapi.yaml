@@ -1,0 +1,400 @@
+asyncapi: 3.0.0
+info:
+  title: Sovereign Bunny Cluster Stream Fabric
+  version: 0.2026.1
+  description: >
+    Canonical Event-Driven Stream and Message Queue Contract for Sovereign Bunny stateless
+    cluster daemons operating over Apache Iggy / Kernel-Bypass Ring Buffers.
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+
+servers:
+  localIggy:
+    host: 127.0.0.1:8090
+    protocol: iggy
+    description: High-throughput local memory-mapped Iggy stream broker
+  clusterMesh:
+    host: iggy.mesh.bunny.internal:8090
+    protocol: iggy
+    description: Inter-pod and cross-node Iggy message bus in Kubernetes/LXC clusters
+
+channels:
+  partitionStream:
+    address: range.{partitionId}
+    parameters:
+      partitionId:
+        description: 16-bit hex range prefix computed as keccak256(to_address)[0..2] (e.g. 0x0000, 0x4000, 0x8000, 0xC000)
+    messages:
+      StatelessTransactionEnvelope:
+        $ref: '#/components/messages/StatelessTransactionEnvelope'
+    description: Sharded partition queues delivering stateless SSZ transactions to partition committee actors.
+
+  epochMarkers:
+    address: sys.epoch-markers
+    messages:
+      EpochMarkerMessage:
+        $ref: '#/components/messages/EpochMarkerMessage'
+    description: Periodic cut markers and state root commitments broadcast by committee partitions to the global Epoch Coordinator.
+
+  committeeRotations:
+    address: sys.committee-rotations
+    messages:
+      RotationEventMessage:
+        $ref: '#/components/messages/RotationEventMessage'
+    description: Finalized VRF seeds and validator committee rotations emitted by the Epoch Coordinator following Snowman BFT finalization.
+
+  stateRoots:
+    address: sys.state-roots
+    messages:
+      StateRootMessage:
+        $ref: '#/components/messages/StateRootMessage'
+    description: Committed partition state roots dispatched to the Storage Archival Daemon for BLAKE3 Bao / IPFS pinning.
+
+  storagePartition:
+    address: sys.storage-partition
+    messages:
+      StorageReceiptMessage:
+        $ref: '#/components/messages/StorageReceiptMessage'
+    description: Content-addressed CIDs and Proof of Retrievability (ZK-PoR) confirmations emitted by the storage daemon.
+
+  crossChain:
+    address: sys.cross-chain
+    messages:
+      CrossChainSagaPacket:
+        $ref: '#/components/messages/CrossChainSagaPacket'
+    description: Inter-cluster cross-chain packets, Reverse Shadow Contract escrows, and 2PC Saga intents routed over BGP/WireGuard mesh.
+
+  zkDnsUpdates:
+    address: sys.zkdns-updates
+    messages:
+      ZkDnsUpdateMessage:
+        $ref: '#/components/messages/ZkDnsUpdateMessage'
+    description: SMT root updates and blinded resource record commitments.
+
+  confidentialE3:
+    address: confidential.0xE3
+    messages:
+      ConfidentialIntentEnvelope:
+        $ref: '#/components/messages/ConfidentialIntentEnvelope'
+    description: Low-latency queue routing encrypted intents directly to SGXv2 enclaves and E3 Ciphernode workers.
+
+  activityPubOutbox:
+    address: sys.activitypub-outbox
+    messages:
+      AnchoredCmsMessage:
+        $ref: '#/components/messages/AnchoredCmsMessage'
+    description: Fediverse ActivityStreams objects and CMS revisions anchored to low-entropy address 0x00...00F1.
+
+operations:
+  ingressPublish:
+    action: send
+    channel:
+      $ref: '#/channels/partitionStream'
+    summary: Ingress Gateway publishes transcoded SSZ transaction to range partition
+    messages:
+      - $ref: '#/components/messages/StatelessTransactionEnvelope'
+
+  committeeConsume:
+    action: receive
+    channel:
+      $ref: '#/channels/partitionStream'
+    summary: Committee actor consumes transaction batch for stateless execution
+    messages:
+      - $ref: '#/components/messages/StatelessTransactionEnvelope'
+
+  epochMarkerPublish:
+    action: send
+    channel:
+      $ref: '#/channels/epochMarkers'
+    summary: Committee actor publishes partition epoch cut marker
+    messages:
+      - $ref: '#/components/messages/EpochMarkerMessage'
+
+  epochFinalize:
+    action: send
+    channel:
+      $ref: '#/channels/committeeRotations'
+    summary: Epoch coordinator broadcasts finalized committee rotation
+    messages:
+      - $ref: '#/components/messages/RotationEventMessage'
+
+  storagePinning:
+    action: send
+    channel:
+      $ref: '#/channels/storagePartition'
+    summary: Storage daemon confirms blob pinning and CID generation
+    messages:
+      - $ref: '#/components/messages/StorageReceiptMessage'
+
+components:
+  messages:
+    StatelessTransactionEnvelope:
+      name: StatelessTransactionEnvelope
+      title: 4-Byte Framed SSZ Transaction Envelope
+      contentType: application/octet-stream
+      headers:
+        type: object
+        properties:
+          magic:
+            type: string
+            description: 3-byte ASCII magic 'BNY'
+            enum: ['BNY']
+          version:
+            type: integer
+            description: Protocol version (0x01)
+            enum: [1]
+      payload:
+        schemaFormat: application/vnd.ssz.container
+        schema:
+          $ref: '#/components/schemas/SszTransactionContainer'
+
+    EpochMarkerMessage:
+      name: EpochMarkerMessage
+      title: Threshold Epoch Marker
+      contentType: application/octet-stream
+      payload:
+        schemaFormat: application/vnd.ssz.container
+        schema:
+          $ref: '#/components/schemas/ThresholdEpochMarkerContainer'
+
+    RotationEventMessage:
+      name: RotationEventMessage
+      title: Committee Rotation Event
+      contentType: application/octet-stream
+      payload:
+        schemaFormat: application/vnd.ssz.container
+        schema:
+          $ref: '#/components/schemas/RotationEventContainer'
+
+    StateRootMessage:
+      name: StateRootMessage
+      title: Partition State Root Commitment
+      contentType: application/octet-stream
+      payload:
+        type: string
+        format: binary
+        description: 32-byte Keccak-256 / SMT partition state root
+
+    StorageReceiptMessage:
+      name: StorageReceiptMessage
+      title: BLAKE3 Bao Storage CID Receipt
+      contentType: application/octet-stream
+      payload:
+        type: string
+        format: binary
+        description: 32-byte BLAKE3 / Iroh content identifier (CID)
+
+    CrossChainSagaPacket:
+      name: CrossChainSagaPacket
+      title: Cross-Cluster Saga / Reverse Shadow Envelope
+      contentType: application/octet-stream
+      payload:
+        schemaFormat: application/vnd.ssz.container
+        schema:
+          $ref: '#/components/schemas/ReverseShadowBurnReceiptContainer'
+
+    ZkDnsUpdateMessage:
+      name: ZkDnsUpdateMessage
+      title: zkDNS SMT Leaf Update Message
+      contentType: application/octet-stream
+      payload:
+        schemaFormat: application/vnd.ssz.container
+        schema:
+          $ref: '#/components/schemas/ZkDnsRecordLeafContainer'
+
+    ConfidentialIntentEnvelope:
+      name: ConfidentialIntentEnvelope
+      title: Hardware-Isolated Confidential Intent Envelope
+      contentType: application/octet-stream
+      payload:
+        schemaFormat: application/vnd.ssz.container
+        schema:
+          $ref: '#/components/schemas/SszTransactionContainer'
+
+    AnchoredCmsMessage:
+      name: AnchoredCmsMessage
+      title: Anchored CMS / ActivityPub Envelope
+      contentType: application/octet-stream
+      payload:
+        schemaFormat: application/vnd.ssz.container
+        schema:
+          $ref: '#/components/schemas/AnchoredCmsDocumentContainer'
+
+  schemas:
+    SszTransactionContainer:
+      type: object
+      description: Fixed-offset 32-byte aligned SSZ Transaction layout
+      properties:
+        chainId:
+          type: integer
+          format: uint64
+        nonce:
+          type: integer
+          format: uint64
+        to:
+          type: string
+          format: binary
+          description: 20-byte destination account address
+        value:
+          type: string
+          format: binary
+          description: 32-byte big-endian transfer value
+        gasLimit:
+          type: integer
+          format: uint64
+        maxFeePerGas:
+          type: integer
+          format: uint64
+        maxPriorityFee:
+          type: integer
+          format: uint64
+        rangeRouting:
+          type: string
+          format: binary
+          description: 16-byte partition routing tag
+        intentId:
+          type: string
+          format: binary
+          description: 32-byte unique intent / transaction identifier
+        signature:
+          type: string
+          format: binary
+          description: 96-byte compact multi-curve signature vector
+        data:
+          type: string
+          format: binary
+          description: Dynamic calldata (up to 1MB)
+
+    ThresholdEpochMarkerContainer:
+      type: object
+      properties:
+        epochId:
+          type: integer
+          format: uint64
+        rangeStart:
+          type: integer
+          format: uint16
+        rangeEnd:
+          type: integer
+          format: uint16
+        stateRoot:
+          type: string
+          format: binary
+          description: 32-byte state root
+        committeeSignature:
+          type: string
+          format: binary
+          description: Aggregated BLS/Ed25519/ML-DSA threshold signature
+
+    RotationEventContainer:
+      type: object
+      properties:
+        epochId:
+          type: integer
+          format: uint64
+        randomnessSeed:
+          type: string
+          format: binary
+          description: 32-byte verifiable random function (VRF) seed
+        activeValidators:
+          type: array
+          items:
+            type: string
+            format: binary
+            description: 20-byte validator EVM addresses
+
+    ReverseShadowBurnReceiptContainer:
+      type: object
+      properties:
+        receiptId:
+          type: string
+          format: binary
+          description: 32-byte original deposit receipt ID
+        nullifier:
+          type: string
+          format: binary
+          description: 32-byte cryptographic nullifier hash
+        originChainId:
+          type: integer
+          format: uint32
+        beneficiary:
+          type: string
+          format: binary
+          description: 20-byte release address on origin cluster
+        burnedEpoch:
+          type: integer
+          format: uint64
+
+    ZkDnsRecordLeafContainer:
+      type: object
+      properties:
+        domainHash:
+          type: string
+          format: binary
+          description: 32-byte blinded domain hash
+        recordType:
+          type: integer
+          format: uint16
+        recordData:
+          type: string
+          format: binary
+          description: 32-byte target IP / WireGuard pubkey payload
+        salt:
+          type: string
+          format: binary
+        smtMembershipProof:
+          type: array
+          items:
+            type: string
+            format: binary
+
+    AnchoredCmsDocumentContainer:
+      type: object
+      properties:
+        schemaVersion:
+          type: integer
+          format: uint16
+        previousRevision:
+          type: string
+          format: binary
+        authorDidHash:
+          type: string
+          format: binary
+        contentCid:
+          type: string
+          format: binary
+        permissionsSmtRoot:
+          type: string
+          format: binary
+        daoQuorumSignature:
+          type: string
+          format: binary
+
+    ChainRegistrationDescriptorContainer:
+      type: object
+      properties:
+        chainId:
+          type: integer
+          format: uint64
+        nameHash:
+          type: string
+          format: binary
+        genesisHeaderHash:
+          type: string
+          format: binary
+        forkDigest:
+          type: string
+          format: binary
+        consensusType:
+          type: integer
+          format: uint8
+        lightClientRoot:
+          type: string
+          format: binary
+        registrationEpoch:
+          type: integer
+          format: uint64
+        authoritySignature:
+          type: string
+          format: binary

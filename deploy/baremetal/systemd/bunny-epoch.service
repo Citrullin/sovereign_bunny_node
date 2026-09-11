@@ -1,0 +1,15 @@
+[Unit]
+Description=Sovereign Bunny Snowman Epoch Consensus Daemon (sovereign-alpha)
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/bunny daemon epoch --epoch-node-id 1
+Restart=always
+RestartSec=3
+Environment="RUST_LOG=info"
+
+[Install]
+WantedBy=multi-user.target

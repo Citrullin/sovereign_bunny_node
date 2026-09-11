@@ -1,0 +1,51 @@
+// WASI WIT Interface Definition for Ingress Gateway and Paymaster Transcoder
+package bunny:gateway@0.1.0;
+
+interface ingress {
+    record envelope-header {
+        magic: list<u8>,
+        version: u8,
+        range-key: u16,
+    }
+
+    record transcode-result {
+        envelope: list<u8>,
+        range-key: u16,
+        intent-id: list<u8>,
+        is-sponsored: bool,
+    }
+
+    record zk-oidc-claim {
+        ephemeral-address: list<u8>,
+        idp-hash: list<u8>,
+        blinded-sub: list<u8>,
+        expiry: u64,
+        proof: list<u8>,
+    }
+
+    record dns-resolution {
+        record-type: u16,
+        resolved-bytes: list<u8>,
+        wireguard-pubkey: option<list<u8>>,
+    }
+
+    /// Transcodes raw RLP or JSON-RPC payload into 4-byte framed canonical SSZ container.
+    transcode-rlp-to-ssz: func(
+        raw-tx: list<u8>,
+        sender-did: string
+    ) -> result<transcode-result, string>;
+
+    /// Computes the 16-bit partition range key for an address: keccak256(addr)[0..2].
+    compute-range-key: func(address: list<u8>) -> u16;
+
+    /// Resolves blinded subdomain from local in-memory SMT cache in <1 microsecond.
+    resolve-zk-dns: func(domain: string) -> result<dns-resolution, string>;
+
+    /// Verifies client-side Noir JWT proof and returns sponsored ephemeral session.
+    authenticate-zk-oidc: func(auth-payload: zk-oidc-claim) -> result<bool, string>;
+}
+
+world gateway-daemon {
+    import wasi:http/outgoing-handler@0.2.0;
+    export ingress;
+}

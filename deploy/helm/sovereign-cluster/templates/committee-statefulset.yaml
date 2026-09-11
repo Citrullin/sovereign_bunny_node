@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ .Release.Name }}-committee
+  labels:
+    app: bunny-committee
+spec:
+  serviceName: {{ .Release.Name }}-committee
+  replicas: {{ .Values.committee.replicaCount }}
+  selector:
+    matchLabels:
+      app: bunny-committee
+  template:
+    metadata:
+      labels:
+        app: bunny-committee
+    spec:
+      containers:
+        - name: committee
+          image: "{{ .Values.gateway.image.repository }}/bunny-committee:latest"
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: IGGY_URL
+              value: "http://{{ .Release.Name }}-iggy:{{ .Values.iggy.port }}"
+            - name: RUST_LOG
+              value: "info"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-epoch
+  labels:
+    app: bunny-epoch
+spec:
+  replicas: {{ .Values.epoch.replicaCount }}
+  selector:
+    matchLabels:
+      app: bunny-epoch
+  template:
+    metadata:
+      labels:
+        app: bunny-epoch
+    spec:
+      containers:
+        - name: epoch
+          image: "{{ .Values.epoch.image.repository }}:{{ .Values.epoch.image.tag }}"
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: IGGY_URL
+              value: "http://{{ .Release.Name }}-iggy:{{ .Values.iggy.port }}"
+            - name: RUST_LOG
+              value: "info"
+

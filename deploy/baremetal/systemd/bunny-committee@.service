@@ -1,0 +1,15 @@
+[Unit]
+Description=Sovereign Bunny Partition Committee Worker %i (sovereign-alpha)
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/bunny daemon committee --partition 0 --range-start %i
+Restart=always
+RestartSec=3
+Environment="RUST_LOG=info"
+
+[Install]
+WantedBy=multi-user.target

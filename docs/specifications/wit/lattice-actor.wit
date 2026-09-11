@@ -1,0 +1,66 @@
+// WASI WIT Interface Definition for Stateless Account-Lattice Committee Actors
+package bunny:lattice-actor@0.1.0;
+
+interface types {
+    enum execution-backend {
+        revm-stateless,
+        sgxv2-enclave,
+        noir-ultra-honk,
+        e3-ciphernode,
+    }
+
+    record account-id {
+        raw: list<u8>,
+    }
+
+    record state-diff {
+        account-id: list<u8>,
+        new-root: list<u8>,
+        nullifiers: list<list<u8>>,
+        gas-used: u64,
+        backend-executed: execution-backend,
+    }
+
+    record transition-proof {
+        proof-type: u8,
+        state-root: list<u8>,
+        witness-commitment: list<u8>,
+    }
+
+    record compliance-query {
+        authority-address: list<u8>,
+        predicate-id: u32,
+        public-claim: list<u8>,
+        proof-bytes: list<u8>,
+    }
+}
+
+interface execution {
+    use types.{state-diff, transition-proof, compliance-query};
+
+    /// Statelessly executes an inbound SSZ transaction against an account witness slice.
+    execute-intent: func(
+        pre-state-root: list<u8>,
+        intent-ssz: list<u8>,
+        witness-ssz: list<u8>
+    ) -> result<state-diff, string>;
+
+    /// Verifies a transition proof independently without executing EVM opcodes.
+    verify-proof: func(
+        pre-state-root: list<u8>,
+        post-state-root: list<u8>,
+        intent-ssz: list<u8>,
+        proof: transition-proof
+    ) -> result<bool, string>;
+
+    /// Statelessly evaluates legal predicates without leaking underlying account state.
+    verify-compliance: func(
+        pre-state-root: list<u8>,
+        query: compliance-query
+    ) -> result<bool, string>;
+}
+
+world stateless-worker {
+    import wasi:logging/logging@0.1.0-draft;
+    export execution;
+}

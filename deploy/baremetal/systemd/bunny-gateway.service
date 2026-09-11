@@ -1,0 +1,17 @@
+[Unit]
+Description=Sovereign Bunny L7 Ingress Gateway (sovereign-alpha)
+After=network.target wg-quick@wg0.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/bunny daemon gateway --port 8545 --bgp-asn 65001
+Restart=always
+RestartSec=3
+LimitNOFILE=65536
+Environment="BGP_ASN=65001"
+Environment="RUST_LOG=info"
+
+[Install]
+WantedBy=multi-user.target

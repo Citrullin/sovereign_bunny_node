@@ -1,0 +1,242 @@
+# Canonical SSZ Container Layouts & Framing Specification
+# Fixed-offset 32-byte alignment matching Ethereum Consensus specifications
+
+version: "0.2026.1"
+envelope_framing:
+  magic: "BNY"       # Bytes 0..3: ASCII characters [0x42, 0x4E, 0x59]
+  version: 0x01      # Byte 3: Protocol major version byte (0x01)
+  fast_validation: "Read 4-byte prefix as u32 little-endian (0x01594E42) in 1 CPU cycle"
+
+containers:
+  SszTransaction:
+    description: "Fixed-offset transaction container inspectable by FPGA / P4 hardware"
+    fields:
+      - name: chain_id
+        type: uint64
+        offset: 0..8
+      - name: nonce
+        type: uint64
+        offset: 8..16
+      - name: to
+        type: Vector[uint8, 20]
+        offset: 16..36
+      - name: value
+        type: Vector[uint8, 32]
+        offset: 36..68
+      - name: gas_limit
+        type: uint64
+        offset: 68..76
+      - name: max_fee_per_gas
+        type: uint64
+        offset: 76..84
+      - name: max_priority_fee
+        type: uint64
+        offset: 84..92
+      - name: range_routing
+        type: Vector[uint8, 16]
+        offset: 92..108
+      - name: intent_id
+        type: Vector[uint8, 32]
+        offset: 108..140
+      - name: signature
+        type: Vector[uint8, 96]
+        offset: 140..236
+      - name: data
+        type: List[uint8, 1048576]
+        offset: 236..end
+
+  ThresholdEpochMarker:
+    description: "Epoch boundary commitment signed by committee threshold"
+    fields:
+      - name: epoch_id
+        type: uint64
+        offset: 0..8
+      - name: range_start
+        type: uint16
+        offset: 8..10
+      - name: range_end
+        type: uint16
+        offset: 10..12
+      - name: state_root
+        type: Vector[uint8, 32]
+        offset: 12..44
+      - name: signature
+        type: Vector[uint8, 96]
+        offset: 44..140
+
+  RotationEvent:
+    description: "Global VRF seed rotation emitted on Snowman BFT finalization"
+    fields:
+      - name: epoch_id
+        type: uint64
+        offset: 0..8
+      - name: randomness_seed
+        type: Vector[uint8, 32]
+        offset: 8..40
+      - name: active_validators
+        type: List[Vector[uint8, 20], 1024]
+        offset: 40..end
+
+  ShadowTokenDescriptor:
+    description: "Superposition escrow receipt on Origin Cluster"
+    fields:
+      - name: receipt_id
+        type: Vector[uint8, 32]
+        offset: 0..32
+      - name: nullifier
+        type: Vector[uint8, 32]
+        offset: 32..64
+      - name: depositor
+        type: Vector[uint8, 20]
+        offset: 64..84
+      - name: recipient
+        type: Vector[uint8, 20]
+        offset: 84..104
+      - name: destination_chain_id
+        type: uint32
+        offset: 104..108
+      - name: virtual_address
+        type: Vector[uint8, 20]
+        offset: 108..128
+      - name: state
+        type: uint8
+        offset: 128..129
+        enum: [0: Inactive, 1: ActiveSuperposition, 2: SettledTerminal]
+
+  ShadowBurnReceipt:
+    description: "Reverse burn proof emitted on Destination Cluster"
+    fields:
+      - name: receipt_id
+        type: Vector[uint8, 32]
+        offset: 0..32
+      - name: nullifier
+        type: Vector[uint8, 32]
+        offset: 32..64
+      - name: origin_chain_id
+        type: uint32
+        offset: 64..68
+      - name: beneficiary
+        type: Vector[uint8, 20]
+        offset: 68..88
+      - name: burned_epoch
+        type: uint64
+        offset: 88..96
+
+  # --- Identity, Privacy & Naming ---
+
+  ZkOidcAuthEnvelope:
+    description: "Client-side Noir-proven OIDC token without PII leakage"
+    fields:
+      - name: ephemeral_account_id
+        type: Vector[uint8, 20]
+        offset: 0..20
+      - name: idp_issuer_hash
+        type: Vector[uint8, 32]
+        offset: 20..52
+      - name: blinded_sub_claim
+        type: Vector[uint8, 32]
+        offset: 52..84
+      - name: session_expiry
+        type: uint64
+        offset: 84..92
+      - name: noir_ultra_honk_proof
+        type: List[uint8, 4096]
+        offset: 92..end
+
+  ZkDnsRecordLeaf:
+    description: "Sparse Merkle Tree leaf for blinded subdomain resolution"
+    fields:
+      - name: domain_hash
+        type: Vector[uint8, 32]
+        offset: 0..32
+      - name: record_type
+        type: uint16
+        offset: 32..34
+        enum: [1: A, 28: AAAA, 16: TXT, 65535: WireGuardKey]
+      - name: record_data
+        type: Vector[uint8, 32]
+        offset: 34..66
+      - name: salt
+        type: Vector[uint8, 32]
+        offset: 66..98
+      - name: smt_membership_proof
+        type: List[Vector[uint8, 32], 32]
+        offset: 98..end
+
+  # --- X-Road & Regulatory Compliance ---
+
+  ZkComplianceAssertion:
+    description: "Selective disclosure assertion for on-chain authority audits"
+    fields:
+      - name: authority_evm_address
+        type: Vector[uint8, 20]
+        offset: 0..20
+      - name: predicate_id
+        type: uint32
+        offset: 20..24
+        enum: [1: TaxLiability, 2: ProofOfSolvency, 3: SanctionsNonMembership]
+      - name: target_epoch
+        type: uint64
+        offset: 24..32
+      - name: declared_public_value
+        type: Vector[uint8, 32]
+        offset: 32..64
+      - name: ultra_honk_proof
+        type: List[uint8, 8192]
+        offset: 64..end
+
+  # --- Anchored P2P CMS & ActivityPub ---
+
+  AnchoredCmsDocument:
+    description: "Version-tolerant CMS and ActivityStreams object anchored to lattice tip"
+    fields:
+      - name: schema_version
+        type: uint16
+        offset: 0..2
+        enum: [1: ActivityStreamsV1, 2: ArticleV2, 3: CommerceOfferV1]
+      - name: previous_revision
+        type: Vector[uint8, 32]
+        offset: 2..34
+      - name: author_did_hash
+        type: Vector[uint8, 32]
+        offset: 34..66
+      - name: content_cid
+        type: Vector[uint8, 32]
+        offset: 66..98
+      - name: permissions_smt_root
+        type: Vector[uint8, 32]
+        offset: 98..130
+      - name: dao_quorum_signature
+        type: Vector[uint8, 96]
+        offset: 130..226
+
+  # --- Cross-Chain Disambiguation & CROA ---
+
+  ChainRegistrationDescriptor:
+    description: "Cryptographic binding for registered namespaces and chain IDs"
+    fields:
+      - name: chain_id
+        type: uint64
+        offset: 0..8
+      - name: name_hash
+        type: Vector[uint8, 32]
+        offset: 8..40
+      - name: genesis_header_hash
+        type: Vector[uint8, 32]
+        offset: 40..72
+      - name: fork_digest
+        type: Vector[uint8, 4]
+        offset: 72..76
+      - name: consensus_type
+        type: uint8
+        offset: 76..77
+        enum: [1: EthereumAltair, 2: BitcoinPoW, 3: BunnySnowman, 4: TendermintBFT]
+      - name: light_client_root
+        type: Vector[uint8, 32]
+        offset: 77..109
+      - name: registration_epoch
+        type: uint64
+        offset: 109..117
+      - name: authority_signature
+        type: Vector[uint8, 96]
+        offset: 117..213

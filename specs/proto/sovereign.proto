@@ -1,0 +1,83 @@
+syntax = "proto3";
+
+package sovereign.v1;
+
+option go_package = "sovereign/v1;sovereignv1";
+
+// High-speed, low-bandwidth gRPC service for Sovereign Account-Lattice over HTTP/3 (QUIC)
+service LatticeNodeService {
+  // Dispatches a stateless transition frame verified statelessly in RAM (<1ms)
+  rpc SubmitStatelessTransition(StatelessTransitionRequest) returns (StatelessTransitionResponse);
+
+  // Subscribes to real-time account block lattice height and slot mutations
+  rpc StreamBlockLattice(LatticeSubscriptionRequest) returns (stream LatticeBlockEvent);
+
+  // Resolves a W3C DID document across the decentralized cluster
+  rpc ResolveDid(DidLookupRequest) returns (DidLookupResponse);
+
+  // Evaluates Zanzibar ReBAC authorization in RAM (<12µs)
+  rpc CheckRebac(RebacCheckRequest) returns (RebacCheckResponse);
+}
+
+enum BackendType {
+  BACKEND_UNKNOWN = 0;
+  BACKEND_SGX_REVM = 1;
+  BACKEND_NOIR_ULTRA_HONK = 2;
+  BACKEND_INTERFOLD_E3 = 3;
+}
+
+message StatelessTransitionRequest {
+  BackendType backend_type = 1;
+  bytes from_account = 2;        // 20 bytes
+  bytes to_account = 3;          // 20 bytes
+  uint32 target_slot = 4;
+  bytes initial_tip = 5;         // 32 bytes
+  bytes final_tip = 6;           // 32 bytes
+  bytes execution_payload = 7;   // Calldata or DAG-CBOR
+  bytes proof_witness = 8;       // SGX quote, UltraHonk SNARK, or MPC BLS sig
+  uint64 epoch = 9;
+}
+
+message StatelessTransitionResponse {
+  bool accepted = 1;
+  bytes tx_hash = 2;             // 32 bytes
+  uint64 account_height = 3;
+  bytes new_state_tip = 4;
+  string error_message = 5;
+}
+
+message LatticeSubscriptionRequest {
+  bytes account = 1;             // 20 bytes
+  uint32 from_height = 2;
+}
+
+message LatticeBlockEvent {
+  bytes account = 1;
+  uint64 height = 2;
+  bytes block_hash = 3;
+  uint32 slot_id = 4;
+  bytes slot_root = 5;
+  uint64 timestamp = 6;
+}
+
+message DidLookupRequest {
+  string did_uri_or_address = 1;
+}
+
+message DidLookupResponse {
+  bool found = 1;
+  string did_document_json = 2;
+  string key_tier = 3;
+}
+
+message RebacCheckRequest {
+  uint32 namespace = 1;
+  bytes object_id = 2;          // 32 bytes
+  uint32 relation = 3;
+  bytes subject = 4;            // 20 bytes
+}
+
+message RebacCheckResponse {
+  bool authorized = 1;
+  uint64 latency_micros = 2;
+}

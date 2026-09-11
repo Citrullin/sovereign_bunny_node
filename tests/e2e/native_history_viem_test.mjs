@@ -1,5 +1,5 @@
 /**
- * Sovereign-Reth Stateless Dual-Wallet Integration Test
+ * Sovereign Bunny Stateless Dual-Wallet Integration Test
  */
 
 import { createWalletClient, http, parseEther, formatEther, keccak256, toHex, pad } from 'viem';

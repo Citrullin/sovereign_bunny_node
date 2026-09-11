@@ -1,0 +1,395 @@
+# components.toml — Sovereign Bunny Ledger Component Manifest
+#
+# Single source of truth for component status, cross-references, and
+# production requirements. Consumed by:
+#   - docs/src/implementation-status.md  (human-readable summary)
+#   - rustdoc `# Stub Status` sections   (inline API docs)
+#   - CI checks                          (fail on missing production_requires)
+#
+# Status values:
+#   production  — shipped, tested, no known gaps
+#   wip         — functional but incomplete; specific gaps noted in wip_notes
+#   stub        — structural skeleton only; production_requires lists what's needed
+#   planned     — not yet started
+
+# ─── Execution Layer ──────────────────────────────────────────────────────────
+
+[component.lattice_execution]
+name        = "Block-Lattice Transaction Execution"
+status      = "wip"
+crate       = "sovereign-consensus"
+module      = "execution::stateless"
+arch_doc    = "architecture/EPOCH_LATTICE.md"
+spec        = "specifications/openrpc.json"
+description = """
+Stateless execution of account-lattice Send, Receive, and ContractCall blocks
+against a witness-cached EVM. Each account maintains an independent chain
+(frontier) of blocks identified by hash; sequence numbers prevent gaps and
+reordering. Balance debits on Send and credits on Receive are live.
+Classical secp256k1 and post-quantum ML-DSA-65 signature paths are both
+complete. Epoch-gated merit rank promotion with cooldown is operational.
+"""
+wip_notes = """
+- The zkEVM context snapshot stored in `paused_context` during a synchronous
+  ContractCall is currently a 4-byte mock. Full Gramine/SGX enclave
+  snapshotting is the production path (tracked under `sgx_enclave`).
+- The `StatelessTransitionFrame::verify` backend (see `transition_frame_verifier`)
+  is a stub; execution proceeds without cryptographic frame verification.
+"""
+
+[component.transition_frame_verifier]
+name        = "StatelessTransitionFrame::verify"
+status      = "stub"
+crate       = "sovereign-consensus"
+module      = "execution::stateless"
+arch_doc    = "architecture/DUAL_ARCH.md"
+description = """
+Verifies the cryptographic proof attached to a stateless transition frame
+before the frame's state delta is applied to the global state root.
+Two backends are planned:
+
+- **SGX DCAP** (`BackendType::SgxRevm`): Parses the DCAP attestation quote
+  and validates the MRENCLAVE measurement against the node's signed allowlist.
+  Ensures that the execution happened inside an authentic hardware enclave.
+
+- **Noir UltraHonk** (`BackendType::NoirUltraHonk`): Submits the proof
+  bytes and public inputs to the Barretenberg verifier together with the
+  registered verification key for the circuit identified in the frame header.
+"""
+stub_notes = """
+Both backends currently perform a byte-length check (≥ 64 bytes) only.
+Any payload of sufficient length passes. The check prevents trivially
+malformed frames but provides no cryptographic security guarantee.
+"""
+production_requires = [
+  "dcap-qvl (or intel-tee-qvl-rust) for DCAP quote parsing and MRENCLAVE allowlist verification",
+  "Barretenberg UltraHonk verifier via C FFI for Noir proof validation",
+  "Registered VK store: circuit_id → verification_key mapping in ValidatorRegistry",
+  "Strict scheme-to-curve pinning in relay_mesh ZK verifier (see zk_proof_verifier)",
+]
+
+[component.eip712_lattice_signing]
+name     = "EIP-712 Lattice Block Signing"
+status   = "production"
+crate    = "sovereign-consensus"
+module   = "execution::stateless"
+arch_doc = "architecture/EPOCH_LATTICE.md"
+description = """
+Computes the EIP-712 structured-data digest for LatticeReceive and LatticeSend
+blocks. The domain separator binds the signature to a specific chain via the
+runtime chain_id (loaded from ValidatorRegistry at startup) and the canonical
+system DID registry address as the verifyingContract. This prevents
+cross-deployment signature replay: a signature valid on one sovereign-reth
+instance cannot be submitted to a different instance.
+"""
+
+[component.secp256k1_recovery]
+name     = "secp256k1 Lattice Signature Verification"
+status   = "production"
+crate    = "sovereign-consensus"
+module   = "execution::stateless"
+description = """
+Verifies a 65-byte (r, s, v) secp256k1 signature on a lattice block.
+Uses k256::ecdsa::VerifyingKey::recover_from_prehash with the full 65-byte
+input, including the recovery byte v. Address recovery is attempted against
+three digest variants (EIP-712, raw payload hash, EIP-191) and accepted if
+any recovers to the account's registered DID EVM address. This tolerates
+different signing conventions across wallet implementations.
+"""
+
+[component.implicit_state_block]
+name     = "Implicit State Block Validation"
+status   = "production"
+crate    = "sovereign-consensus"
+module   = "execution::stateless"
+arch_doc = "architecture/HYBRID_CONSENSUS.md"
+description = """
+Validates a committee-signed implicit state block that advances the global
+state root without a user transaction. Counts valid validator signatures
+from the registered validator set and enforces a BFT quorum of ⌊2n/3⌋+1
+before accepting the new state root. In test/genesis configurations (no
+registered validators) a single valid signature is accepted to allow
+bootstrapping without a live validator set.
+"""
+
+# ─── Consensus & Epoch Layer ──────────────────────────────────────────────────
+
+[component.bft_epoch_finality]
+name     = "Epoch BFT Finalization"
+status   = "wip"
+crate    = "sovereign-consensus"
+module   = "engine::epoch"
+arch_doc = "architecture/HYBRID_CONSENSUS.md"
+description = """
+Finalizes an epoch boundary by collecting threshold BLS signatures from
+ThresholdEpochMarker events, crediting merit payouts to account balances,
+and writing an immutable EpochCheckpoint. The checkpoint commits the global
+state root, epoch ID, and validator signature set. No checkpoint may be
+finalized with an empty signature set; this prevents single-node epoch
+forgery.
+"""
+wip_notes = """
+The BLS signature collection structure is in place: the checkpoint is
+rejected unless at least one ThresholdEpochMarker with a non-empty
+`bls_signature` field is present. Full threshold aggregation (t-of-n BLS,
+where t = ⌊2n/3⌋+1) across the live validator set is the production target.
+"""
+production_requires = [
+  "blst or bls12-381 crate for threshold BLS signature aggregation and verification",
+  "VRF-based validator set rotation seeding (structured ThresholdEpochMarker broadcast)",
+]
+
+[component.merit_distribution]
+name     = "Progressive Merit Rank Distribution"
+status   = "production"
+crate    = "sovereign-consensus"
+module   = "engine::epoch"
+arch_doc = "architecture/PENTA_VECTOR_ECONOMICS.md"
+description = """
+Distributes TBL merit rewards at each epoch boundary based on each
+account's reputation score and progressive merit rank tier (Rank0–Rank4).
+Rank promotion is gated by a cooldown: an account must hold a rank for
+MERIT_RANK_COOLDOWN_EPOCHS consecutive epochs before being eligible for
+the next tier. This prevents reputation spikes from immediately granting
+the maximum payout multiplier (1000×), which would allow an attacker to
+temporarily inflate their score and immediately capture outsized rewards.
+Balance credits are applied directly to account_balances in the registry.
+"""
+
+[component.gnosis_payment_watcher]
+name     = "GnosisPaymentWatcher"
+status   = "stub"
+crate    = "sovereign-consensus"
+module   = "engine::epoch"
+arch_doc = "architecture/HYBRID_CONSENSUS.md"
+description = """
+Monitors the Gnosis Chain EURe contract for finalized Transfer events
+corresponding to pending NFT purchase intents registered via the
+ISagaIntentRouter precompile. Only intents with verified on-chain
+Transfer events at sufficient confirmation depth are confirmed; all others
+remain pending until the Transfer is observed or the intent expires.
+"""
+stub_notes = """
+The current implementation iterates the pending intent map but does not
+make any RPC calls. It is wired to reject unverifiable intents correctly
+at the structural level but cannot confirm any real payment without a
+live Gnosis Chain RPC connection and eth_getLogs polling.
+"""
+production_requires = [
+  "alloy-provider (or ethers-rs) for eth_getLogs calls against Gnosis Chain",
+  "Configurable finality depth k (number of block confirmations before confirming)",
+  "EURe contract address and Transfer event ABI in StaticConfig",
+]
+
+# ─── Governance & Registry ────────────────────────────────────────────────────
+
+[component.validator_registry]
+name     = "ValidatorRegistry"
+status   = "wip"
+crate    = "sovereign-consensus"
+module   = "governance::registry"
+arch_doc = "architecture/C4_ARCHITECTURE.md"
+description = """
+Central in-memory state store for the Sovereign Bunny node. Holds the
+canonical DID identity directory, account frontiers (lattice tips),
+settled account balances, validator set, reputation scores, merit ranks,
+epoch checkpoints, and all replay-prevention sets. A single RwLock guards
+the registry; all reads use shared locks and all writes use exclusive locks.
+The registry is intentionally monolithic to avoid distributed state
+synchronization during stateless execution — each committee partition
+holds its own registry snapshot, reconciled at epoch boundaries.
+"""
+wip_notes = """
+The registry will be split into focused sub-modules (identity, frontier,
+epoch_state, genesis, manifold) as the codebase matures. The current
+single-struct layout is a deliberate early-stage trade-off for simplicity
+over modularity.
+"""
+
+[component.reclaim_sends]
+name     = "Floating Send Reclaim"
+status   = "production"
+crate    = "sovereign-consensus"
+module   = "governance::registry"
+description = """
+Processes unclaimed Send blocks that have exceeded the reclaim timeout.
+A Send block is 'floating' when the recipient has not yet submitted a
+corresponding Receive block. Without a timeout mechanism, a sender who
+sends to a non-responsive address would have their balance locked
+indefinitely. After `reclaim_timeout_epochs` epochs the sender may
+reclaim the funds; the registry credits the sender and removes the
+floating send from tracking.
+"""
+
+[component.genesis_loader]
+name     = "Genesis Allocation Loader"
+status   = "production"
+crate    = "sovereign-consensus"
+module   = "governance::registry"
+description = """
+Loads the initial account balance allocations from a genesis.json file
+whose path is supplied exclusively via StaticConfig. The path is never
+inferred by walking parent directories, which would allow a compromised
+working directory to inject a malicious genesis file during node startup.
+"""
+
+# ─── Shadow Contracts ─────────────────────────────────────────────────────────
+
+[component.shadow_contracts]
+name     = "Universal Reverse Shadow Contracts"
+status   = "wip"
+crate    = "sovereign-consensus"
+module   = "system_contracts::shadow_contract"
+arch_doc = "architecture/MIRRORED_CHAINS_LATTICE_THREADS.md"
+description = """
+Cross-chain asset lifecycle system. Native assets are escrowed on the
+origin chain (balance debited from the depositor at wrap time) and shadow
+tokens are minted on the destination chain. The 1:1 reserve invariant is
+maintained by debiting before creating the escrow — it is impossible to
+back more shadow tokens than the locked native balance. Native assets are
+released only upon a verified ShadowBurnReceipt proving the shadow token
+was destroyed on the destination chain after k epochs of finality depth.
+A nullifier prevents the same burn receipt from releasing funds twice.
+The destination chain ID is an explicit parameter to every burn initiation
+call so that the origin chain can verify the burn happened on the intended
+chain and not on an attacker-controlled fork.
+"""
+wip_notes = """
+The burn proof verification checks epoch depth and nullifier uniqueness
+but does not yet verify the actual cross-chain Merkle inclusion proof
+of the ShadowBurnReceipt in the destination chain's state root.
+"""
+production_requires = [
+  "Cross-chain Merkle proof verifier for ShadowBurnReceipt inclusion",
+  "Light-client state root feed for destination chains (or relay attestation)",
+]
+
+# ─── Network & Relay ──────────────────────────────────────────────────────────
+
+[component.cross_manifold_relay]
+name     = "Cross-Manifold Message Relay"
+status   = "wip"
+crate    = "sovereign-consensus"
+module   = "mesh::relay_mesh"
+arch_doc = "architecture/BASED_WITNESS_MESH.md"
+description = """
+Routes cross-cluster messages between sovereign-reth deployments over
+KZG-committed blob envelopes. Each message carries a unique message_id;
+the relay checks this ID against a per-registry nullifier set before
+processing and inserts it afterward. This prevents replay: an attacker
+capturing a legitimate cross-manifold packet cannot re-submit it to the
+same or a different cluster to re-execute its payload (token mints, shadow
+asset transfers). Entries are expired after N epochs to bound memory.
+"""
+wip_notes = """
+Nullifier expiry (removing entries after N epochs) is tracked in the
+registry but the epoch-triggered cleanup loop is not yet wired to the
+epoch finalizer.
+"""
+
+[component.zk_proof_verifier]
+name     = "ZK Proof Scheme Verifier (relay mesh)"
+status   = "stub"
+crate    = "sovereign-consensus"
+module   = "mesh::relay_mesh"
+arch_doc = "architecture/BASED_WITNESS_MESH.md"
+description = """
+Verifies ZK proofs attached to cross-manifold messages. Two schemes are
+planned: BiniusBinaryStark (binary field STARK over Binius) and
+Plonky3Blake3 (FRI-based SNARK with Blake3 Merkle trees). Each scheme
+must be pinned to its deterministic curve/field; accepting a mismatched
+proof allows an attacker to submit a structurally different proof system
+under a scheme's name and bypass verification.
+"""
+stub_notes = """
+Currently validates proof byte-length (≥ 32 bytes) only. Both schemes
+match on scheme name with a wildcard curve, accepting any curve for any
+scheme. No real STARK or SNARK verification is performed.
+"""
+production_requires = [
+  "Binius binary field STARK verifier (binius-core or equivalent)",
+  "Plonky3 verifier with Blake3 Merkle tree commitment scheme",
+  "Strict scheme-to-curve pinning table — reject proofs whose curve does not match the registered scheme",
+]
+
+# ─── Identity ─────────────────────────────────────────────────────────────────
+
+[component.did_registry]
+name     = "DID Identity Registry"
+status   = "production"
+crate    = "sovereign-consensus"
+module   = "governance::registry"
+arch_doc = "architecture/ZKOIDC_AUTHENTICATION.md"
+description = """
+Resolves and stores W3C DID documents for registered identities. Supports
+did:sovereign:[chain_id]:[evm_address] and did:peer:4... long-form DIDs.
+Classical (secp256k1, ed25519) and post-quantum (ML-DSA-65, Falcon-512)
+public keys are stored per-account with a key tier indicator. The quantum
+trigger flag in DynamicConfig switches the node to reject classical
+signatures globally and require PQ keys for all new lattice blocks.
+"""
+
+[component.paymaster]
+name     = "Paymaster Risk Frame Verification"
+status   = "production"
+crate    = "sovereign-consensus"
+module   = "execution::frame_tx"
+description = """
+Verifies a PaymasterRiskFrame before a gasless transaction is accepted.
+The paymaster's secp256k1 signature over (sender, target, nonce, max_cost,
+valid_until_epoch) must recover to the paymaster's registered EVM address.
+An empty or structurally invalid signature is rejected outright — accepting
+a non-empty but cryptographically invalid signature would allow any caller
+to fabricate a frame and charge gas to an arbitrary paymaster address.
+Expired frames (valid_until_epoch < current_epoch) are also rejected to
+prevent reuse of a compromised paymaster authorization across future epochs.
+"""
+
+# ─── SGX / Enclave ────────────────────────────────────────────────────────────
+
+[component.sgx_enclave]
+name     = "SGX Gramine Confidential Execution"
+status   = "planned"
+crate    = "sovereign-consensus"
+module   = "execution::stateless (BackendType::SgxRevm)"
+arch_doc = "architecture/DUAL_ARCH.md"
+description = """
+Hardware-isolated confidential EVM execution inside an Intel SGXv2/TDX
+enclave managed by Gramine. The enclave produces a DCAP attestation quote
+proving that execution occurred inside an authentic enclave with a known
+MRENCLAVE measurement. The quote is attached as a StatelessTransitionFrame
+and verified by remote validators before the state delta is accepted.
+"""
+production_requires = [
+  "Gramine manifest and enclave build (see gramine/ directory)",
+  "dcap-qvl integration in StatelessTransitionFrame::verify",
+  "MRENCLAVE allowlist management in ValidatorRegistry",
+  "zkEVM context snapshot/restore for paused_context (Chandy-Lamport integration)",
+]
+
+# ─── Anti-Sybil ───────────────────────────────────────────────────────────────
+
+[component.anti_sybil]
+name     = "Anti-Sybil Topology Validation"
+status   = "wip"
+crate    = "sovereign-consensus"
+module   = "governance::anti_sybil"
+arch_doc = "architecture/HYBRID_CONSENSUS.md"
+description = """
+Validates that registering validators demonstrate genuine hardware and
+network diversity. Each validator submits a NodeTopologyDescriptor
+containing a hardware PPID, BGP ASN, and Vivaldi network coordinates.
+The anti-sybil engine enforces minimum diversity thresholds across the
+registered validator set to prevent a single operator from controlling
+a majority of validators through manufactured identities.
+"""
+wip_notes = """
+NodeTopologyDescriptor fields are currently accepted as self-reported
+values without external validation. A single machine can register
+multiple validators with invented PPIDs and ASNs.
+"""
+production_requires = [
+  "PPID must be extracted from a verified DCAP attestation quote (see sgx_enclave)",
+  "BGP ASN must be cross-referenced with an IP-to-ASN database at registration time",
+  "Vivaldi coordinates must be validated against measured round-trip times to known peers",
+]

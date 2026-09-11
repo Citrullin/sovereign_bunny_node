@@ -1,0 +1,36 @@
+// WASI WIT Interface Definition for Backend-Agnostic Storage Engine (VFS) & Proof-of-Retrievability (PoR)
+package bunny:storage-engine@0.1.0;
+
+interface vfs {
+    record blob-handle {
+        cid: list<u8>,
+        total-chunks: u64,
+        outboard-root: list<u8>,
+    }
+
+    record challenge-request {
+        cid: list<u8>,
+        epoch-randomness: list<u8>,
+        sector-index: u32,
+    }
+
+    record challenge-response {
+        cid: list<u8>,
+        chunk-data: list<u8>,
+        bao-merkle-path: list<list<u8>>,
+        ultra-honk-proof: list<u8>,
+    }
+
+    /// Stores a payload using whichever backend the node operator configures (Iroh, NVMe, S3/Ceph).
+    store-blob: func(payload: list<u8>) -> result<blob-handle, string>;
+
+    /// Generates a stateless proof of retrievability for an epoch challenge.
+    prove-challenge: func(req: challenge-request) -> result<challenge-response, string>;
+
+    /// Verifies the challenge response statelessly in RAM in <1ms.
+    verify-response: func(res: challenge-response, expected-root: list<u8>) -> bool;
+}
+
+world storage-node {
+    export vfs;
+}

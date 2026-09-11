@@ -1,0 +1,15 @@
+[Unit]
+Description=Sovereign Bunny BGP & WireGuard Transport Daemon (sovereign-alpha)
+After=network.target wg-quick@wg0.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/bunny daemon mesh --bgp-asn 65001 --wireguard-endpoint 0.0.0.0:51820
+Restart=always
+RestartSec=3
+Environment="RUST_LOG=info"
+
+[Install]
+WantedBy=multi-user.target

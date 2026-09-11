@@ -31,9 +31,17 @@ cleanup() {
 trap cleanup INT TERM EXIT
 
 # Check if binary is built
-if [ ! -f "./target/release/sovereign-reth" ]; then
-  echo "ERROR: sovereign-reth binary not found at ./target/release/sovereign-reth"
-  echo "Please run: ./build.sh --target host"
+if [ -f "./target/release/sovereign-bunny" ]; then
+  BIN="./target/release/sovereign-bunny"
+elif [ -f "./target/release/sovereign-reth" ]; then
+  BIN="./target/release/sovereign-reth"
+elif [ -f "./target/debug/sovereign-bunny" ]; then
+  BIN="./target/debug/sovereign-bunny"
+elif [ -f "./target/debug/sovereign-reth" ]; then
+  BIN="./target/debug/sovereign-reth"
+else
+  echo "ERROR: sovereign-bunny or sovereign-reth binary not found in target directories"
+  echo "Please run: cargo build -p sovereign-node"
   exit 1
 fi
 
@@ -53,14 +61,14 @@ rm -rf db1 db2 node1.log node2.log
 
 # Initialize genesis storage
 echo "=== Initializing Node 1 ==="
-./target/release/sovereign-reth init --chain genesis.json --datadir db1
+$BIN init --chain genesis.json --datadir db1
 
 echo "=== Initializing Node 2 ==="
-./target/release/sovereign-reth init --chain genesis.json --datadir db2
+$BIN init --chain genesis.json --datadir db2
 
 # Start Node 1 (Validator / Auto-Mining Mode)
 echo "=== Starting Node 1 (Validator/Auto-Miner) ==="
-./target/release/sovereign-reth node \
+$BIN node \
   --dev \
   --chain genesis.json \
   --datadir db1 \
@@ -96,7 +104,7 @@ fi
 
 # Start Node 2 (Replica / Peering Mode)
 echo "=== Starting Node 2 (Replica) ==="
-./target/release/sovereign-reth node \
+$BIN node \
   --node-type replica \
   --chain genesis.json \
   --datadir db2 \

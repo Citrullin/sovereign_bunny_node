@@ -1,5 +1,5 @@
 /**
- * E2E Wallet Integration Tests for Sovereign-Reth.
+ * E2E Wallet Integration Tests for Sovereign Bunny.
  *
  * Verifies:
  * 1. CAIP-25, 211, 285, 311, 312 Session Lifecycle.
@@ -143,7 +143,7 @@ function getDidToolPath() {
 }
 
 async function runTests() {
-  console.log('🚀 Starting Sovereign-Reth CAIP E2E Integration Tests...\n');
+  console.log('🚀 Starting Sovereign Bunny CAIP E2E Integration Tests...\n');
 
   USER_DID = generatePeer4Did(MASTER_SEED, true);
 

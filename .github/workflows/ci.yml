@@ -1,0 +1,46 @@
+name: Sovereign Bunny CI/CD & Sigstore Supply Chain
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+jobs:
+  test-matrix:
+    name: Multi-Process Cluster Test Suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache Cargo Dependencies
+        uses: Swatinem/rust-cache@v2
+      - name: Run Cluster Integration Matrix
+        run: cargo test -p sovereign-cluster-tests --lib -- --test-threads=1
+
+  build-and-sign:
+    name: Build Daemons, Sign OCI with Cosign & Helm Lint
+    needs: test-matrix
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: sigstore/cosign-installer@v3.5.0
+      - uses: azure/setup-helm@v4.2.0
+
+      - name: Validate Helm Chart
+        run: |
+          helm lint deploy/helm/sovereign-cluster
+          helm template sovereign deploy/helm/sovereign-cluster -f deploy/helm/sovereign-cluster/values-k3s-dev.yaml
+
+      - name: Build and Package Daemon Artifacts
+        run: |
+          cargo build --workspace --bins --release
+
+      - name: Verify Koral Supply Chain Verification
+        run: |
+          cargo test -p koral-verify

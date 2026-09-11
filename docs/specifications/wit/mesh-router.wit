@@ -1,0 +1,37 @@
+// WASI WIT Interface Definition for BGP/WireGuard Mesh and Universal Reverse Shadow Contracts
+package bunny:mesh@0.1.0;
+
+interface transport {
+    record shadow-descriptor {
+        receipt-id: list<u8>,
+        nullifier: list<u8>,
+        depositor: list<u8>,
+        recipient: list<u8>,
+        destination-chain-id: u32,
+    }
+
+    record burn-receipt {
+        receipt-id: list<u8>,
+        nullifier: list<u8>,
+        origin-chain-id: u32,
+        beneficiary: list<u8>,
+        burned-epoch: u64,
+    }
+
+    /// Encapsulates and routes a cross-cluster state proof across BGP Anycast mesh.
+    forward-packet: func(
+        target-asn: u32,
+        encrypted-payload: list<u8>
+    ) -> result<bool, string>;
+
+    /// Verifies k-epoch finality confirmation depth and releases native asset from burn proof.
+    verify-and-release: func(
+        receipt: burn-receipt,
+        current-epoch: u64,
+        required-reorg-depth: u64
+    ) -> result<bool, string>;
+}
+
+world mesh-daemon {
+    export transport;
+}

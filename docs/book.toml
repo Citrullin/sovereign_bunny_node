@@ -1,0 +1,16 @@
+[book]
+title = "Sovereign Bunny Ledger"
+description = "Architecture, specifications, implementation status, and API reference for the Sovereign Reth account-lattice node."
+authors = ["Sovereign Bunny Contributors"]
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"
+create-missing = false
+
+[rust]
+edition = "2021"
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"

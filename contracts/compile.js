@@ -33,5 +33,10 @@ const contract = output.contracts['SimplePaymaster.sol']['SimplePaymaster'];
 const runtimeBytecode = contract.evm.deployedBytecode.object;
 const abi = contract.abi;
 
-fs.writeFileSync(path.resolve(__dirname, 'out', 'SimplePaymaster.runtime.bin'), runtimeBytecode);
+const outDir = path.resolve(__dirname, 'out');
+if (!fs.existsSync(outDir)) {
+    fs.mkdirSync(outDir, { recursive: true });
+}
+
+fs.writeFileSync(path.resolve(outDir, 'SimplePaymaster.runtime.bin'), runtimeBytecode);
 console.log('Runtime bytecode length:', runtimeBytecode.length);

@@ -1,0 +1,74 @@
+# Default values for sovereign-cluster.
+global:
+  clusterName: "hackerspace-berlin-01"
+  domain: "bunny.mesh"
+
+gateway:
+  replicaCount: 2
+  image:
+    repository: ghcr.io/sovereign-reth/gateway
+    tag: latest
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    httpPort: 8545
+    sszPort: 9000
+
+rpcProxy:
+  replicaCount: 2
+  image:
+    repository: ghcr.io/sovereign-reth/rpc-proxy
+    tag: latest
+  service:
+    type: ClusterIP
+    port: 8546
+
+committee:
+  replicaCount: 4
+  partitions:
+    - rangeStart: "0x0000"
+      rangeEnd: "0x3FFF"
+    - rangeStart: "0x4000"
+      rangeEnd: "0x7FFF"
+    - rangeStart: "0x8000"
+      rangeEnd: "0xBFFF"
+    - rangeStart: "0xC000"
+      rangeEnd: "0xFFFF"
+  runtimeClassName: wasmtime-spin
+
+epoch:
+  replicaCount: 1
+  image:
+    repository: ghcr.io/sovereign-reth/epoch
+    tag: latest
+
+storage:
+  replicaCount: 3
+  image:
+    repository: ghcr.io/sovereign-reth/storage
+    tag: latest
+
+mesh:
+  replicaCount: 2
+  image:
+    repository: ghcr.io/sovereign-reth/mesh
+    tag: latest
+
+iggy:
+  replicaCount: 1
+  image:
+    repository: iggyrs/iggy
+    tag: latest
+  port: 8090
+
+bgp:
+  enabled: true
+  localAs: 65001
+  peerAs: 65000
+  sidecarLoopback: "127.0.0.1"
+  darkFiberPorts:
+    - eth0
+    - eth1
+    - eth2
+    - eth3
+  ecmp: true

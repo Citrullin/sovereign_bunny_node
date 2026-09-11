@@ -1,0 +1,306 @@
+{
+  "openrpc": "1.3.2",
+  "info": {
+    "title": "Sovereign Bunny Gateway & RPC Proxy JSON-RPC 2.0 API",
+    "version": "0.2026.1",
+    "description": "Standard Web3 JSON-RPC 2.0 interface alongside Low-Entropy System Address Contracts (EIP-1352) and Sovereign Daemon Fast-Path Extensions (bunny_*).",
+    "license": {
+      "name": "Apache-2.0",
+      "url": "https://www.apache.org/licenses/LICENSE-2.0"
+    }
+  },
+  "servers": [
+    {
+      "name": "Local Gateway Ingress",
+      "url": "http://127.0.0.1:8545",
+      "description": "L7 JSON-RPC endpoint transcoding RLP/JSON into 4-byte framed SSZ envelopes"
+    },
+    {
+      "name": "High-Performance RPC Read Proxy",
+      "url": "http://127.0.0.1:8546",
+      "description": "Synthetic receipts and 48-hour hot state read cache"
+    }
+  ],
+  "methods": [
+    {
+      "name": "eth_sendRawTransaction",
+      "summary": "Submits an RLP or SSZ encoded raw transaction to standard contracts or low-entropy system addresses",
+      "description": "Routes standard EVM transactions or SSZ envelopes into partition queues. When targeting low-entropy system addresses (0x01..0x0A, 0x100) or virtual chain addresses (0x00..01<ChainID>), system decoders execute native logic without extra RPC overhead.",
+      "params": [
+        {
+          "name": "signedTxData",
+          "description": "Hex-encoded raw transaction bytecode (RLP EIP-2718 or SSZ with 0x424e5901 header)",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^0x[0-9a-fA-F]+$"
+          }
+        }
+      ],
+      "result": {
+        "name": "transactionHash",
+        "description": "32-byte transaction hash or intent ID",
+        "schema": {
+          "type": "string",
+          "pattern": "^0x[0-9a-fA-F]{64}$"
+        }
+      }
+    },
+    {
+      "name": "eth_call",
+      "summary": "Executes a message call transaction immediately without creating a transaction on the ledger",
+      "description": "Executes EVM bytecode or queries low-entropy system contracts (e.g. querying DID registry at 0x00...03, account height at 0x00...0100, or virtual chain state at 0x00..01<ChainID>).",
+      "params": [
+        {
+          "name": "callObject",
+          "required": true,
+          "schema": {
+            "type": "object",
+            "properties": {
+              "from": { "type": "string" },
+              "to": { "type": "string", "description": "Target address or low-entropy system address (e.g. 0x0000000000000000000000000000000000000003)" },
+              "data": { "type": "string", "description": "ABI encoded function calldata" },
+              "value": { "type": "string" }
+            },
+            "required": ["to"]
+          }
+        },
+        {
+          "name": "blockParameter",
+          "required": false,
+          "schema": { "type": "string", "default": "latest" }
+        }
+      ],
+      "result": {
+        "name": "returnBytes",
+        "schema": { "type": "string", "pattern": "^0x[0-9a-fA-F]*$" }
+      }
+    },
+    {
+      "name": "eth_blockNumber",
+      "summary": "Returns the latest finalized epoch height or block number",
+      "params": [],
+      "result": {
+        "name": "blockNumber",
+        "schema": {
+          "type": "string",
+          "pattern": "^0x[0-9a-fA-F]+$"
+        }
+      }
+    },
+    {
+      "name": "eth_getBalance",
+      "summary": "Returns the balance of the account at specified block/epoch height",
+      "params": [
+        {
+          "name": "address",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^0x[0-9a-fA-F]{40}$"
+          }
+        },
+        {
+          "name": "blockParameter",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "name": "balanceWei",
+        "schema": {
+          "type": "string",
+          "pattern": "^0x[0-9a-fA-F]+$"
+        }
+      }
+    },
+    {
+      "name": "bunny_resolveDid",
+      "summary": "Off-chain / P2P Fast-Path: Resolves a W3C DID document across 11 cryptographic and post-quantum curves",
+      "description": "Fast-path daemon query. On-chain contracts can alternatively call eth_call targeting SYSTEM_DID_REGISTRY (0x0000000000000000000000000000000000000003).",
+      "params": [
+        {
+          "name": "didUri",
+          "description": "W3C DID URI string (e.g. did:peer:4... or did:sovereign:...)",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "name": "didDocument",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "did": { "type": "string" },
+            "evmAddress": { "type": "string" },
+            "secp256k1PublicKey": { "type": "string" },
+            "ed25519PublicKey": { "type": "string" },
+            "mlDsaPublicKey": { "type": "string" },
+            "falconPublicKey": { "type": "string" },
+            "slhDsaPublicKey": { "type": "string" }
+          },
+          "required": ["did", "evmAddress"]
+        }
+      }
+    },
+    {
+      "name": "bunny_simulateSagaIntent",
+      "summary": "Daemon Fast-Path Simulation: Simulates cross-chain 2PC Saga intents or Reverse Shadow contract execution in RAM",
+      "description": "Directly invokes the stateless execution worker to simulate escrow lockups, gas costs, and nullifiers without on-chain state mutations. For on-chain settlement, dispatch transactions to SYSTEM_SAGA_ESCROW (0x04) or SYSTEM_BRIDGE (0x06).",
+      "params": [
+        {
+          "name": "intentPayload",
+          "required": true,
+          "schema": {
+            "type": "object",
+            "properties": {
+              "targetChainId": { "type": "integer" },
+              "assetType": { "type": "string", "enum": ["Fungible", "NonFungible", "MultiToken"] },
+              "amount": { "type": "string" },
+              "recipient": { "type": "string" }
+            },
+            "required": ["targetChainId", "assetType", "recipient"]
+          }
+        }
+      ],
+      "result": {
+        "name": "simulationResult",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "success": { "type": "boolean" },
+            "virtualAddress": { "type": "string" },
+            "estimatedGas": { "type": "string" },
+            "nullifierHash": { "type": "string" }
+          },
+          "required": ["success", "virtualAddress", "nullifierHash"]
+        }
+      }
+    },
+    {
+      "name": "bunny_queryStorageCid",
+      "summary": "Off-chain / IPFS Fast-Path: Queries storage availability and BLAKE3 Bao CID proof for a given state root",
+      "description": "Queries the Storage Daemon directly over P2P/Iroh for data availability and retrievability status.",
+      "params": [
+        {
+          "name": "stateRoot",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^0x[0-9a-fA-F]{64}$"
+          }
+        }
+      ],
+      "result": {
+        "name": "storageStatus",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "cid": { "type": "string" },
+            "isPinned": { "type": "boolean" },
+            "sizeBytes": { "type": "integer" },
+            "nmtSector": { "type": "integer" }
+          },
+          "required": ["cid", "isPinned"]
+        }
+      }
+    },
+    {
+      "name": "bunny_resolveZkDns",
+      "summary": "Resolves a domain name to IP or WireGuard public key via stateless SMT proof",
+      "description": "Blinded subdomain query resolved in <1µs from in-memory Sparse Merkle Trees without exposing DNS lookup queries to recursive resolvers.",
+      "params": [
+        {
+          "name": "domain",
+          "description": "Domain name string (e.g., chat.hackerspace.mesh)",
+          "required": true,
+          "schema": { "type": "string" }
+        }
+      ],
+      "result": {
+        "name": "dnsResolution",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "domainHash": { "type": "string" },
+            "ipAddress": { "type": "string" },
+            "wireGuardPubKey": { "type": "string" },
+            "epochRoot": { "type": "string" },
+            "verified": { "type": "boolean" }
+          },
+          "required": ["domainHash", "verified"]
+        }
+      }
+    },
+    {
+      "name": "bunny_submitZkOidcAuth",
+      "summary": "Authenticates a Web2 OIDC token inside a Noir ZK circuit without disclosing PII",
+      "description": "Verifies client-side Noir UltraHonk proof of Google/Apple JWT. Binds an ephemeral session key and unlocks native Paymaster gas sponsorship.",
+      "params": [
+        {
+          "name": "authEnvelope",
+          "required": true,
+          "schema": {
+            "type": "object",
+            "properties": {
+              "idpIssuer": { "type": "string" },
+              "blindedSubClaim": { "type": "string" },
+              "ultraHonkProof": { "type": "string" },
+              "sessionExpiry": { "type": "integer" }
+            },
+            "required": ["idpIssuer", "blindedSubClaim", "ultraHonkProof"]
+          }
+        }
+      ],
+      "result": {
+        "name": "authResult",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "authenticated": { "type": "boolean" },
+            "ephemeralAddress": { "type": "string" },
+            "paymasterSponsored": { "type": "boolean" }
+          },
+          "required": ["authenticated", "ephemeralAddress"]
+        }
+      }
+    },
+    {
+      "name": "bunny_verifyZkCompliance",
+      "summary": "Evaluates a Noir zkCompliance predicate for X-Road regulatory audit",
+      "description": "Evaluates selective disclosure assertions (TaxLiability, Solvency, SanctionsNonMembership) without leaking underlying account state.",
+      "params": [
+        {
+          "name": "complianceAssertion",
+          "required": true,
+          "schema": {
+            "type": "object",
+            "properties": {
+              "authorityAddress": { "type": "string" },
+              "predicateId": { "type": "integer" },
+              "declaredPublicValue": { "type": "string" },
+              "ultraHonkProof": { "type": "string" }
+            },
+            "required": ["authorityAddress", "predicateId", "ultraHonkProof"]
+          }
+        }
+      ],
+      "result": {
+        "name": "complianceStatus",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "compliant": { "type": "boolean" },
+            "receiptHash": { "type": "string" },
+            "anchoredEpoch": { "type": "string" }
+          },
+          "required": ["compliant", "receiptHash"]
+        }
+      }
+    }
+  ]
+}

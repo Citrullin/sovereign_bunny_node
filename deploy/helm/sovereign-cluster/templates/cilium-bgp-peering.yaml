@@ -1,0 +1,18 @@
+apiVersion: cilium.io/v2alpha1
+kind: CiliumBGPPeeringPolicy
+metadata:
+  name: {{ .Release.Name }}-bgp-peering
+spec:
+  nodeSelectors:
+    - matchLabels:
+        bunny.mesh/bgp-node: "true"
+  virtualRouters:
+    - localASN: {{ .Values.bgp.localAs }}
+      exportPodCIDR: true
+      neighbors:
+        - peerAddress: "{{ .Values.bgp.sidecarLoopback }}/32"
+          peerASN: {{ .Values.bgp.peerAs }}
+          eBGPMultihopTTL: 1
+          connectRetryTimeSeconds: 5
+          holdTimeSeconds: 9
+          keepAliveTimeSeconds: 3

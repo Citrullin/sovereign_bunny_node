@@ -1,0 +1,15 @@
+[Unit]
+Description=Sovereign Bunny Iroh P2P Storage Daemon (sovereign-alpha)
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/bunny daemon storage --storage-id 1 --dir /data/iroh
+Restart=always
+RestartSec=3
+Environment="RUST_LOG=info"
+
+[Install]
+WantedBy=multi-user.target

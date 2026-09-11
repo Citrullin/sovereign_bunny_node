@@ -7,12 +7,22 @@ echo "🧹 Cleaning up port 8545..."
 fuser -k 8545/tcp || true
 sleep 1
 
-echo "🚀 Launching Sovereign-Reth node for E2E integration test..."
-TEST_DB="/tmp/sovereign-reth-cli-db-$(date +%s)"
+echo "🚀 Launching Sovereign Bunny node for E2E integration test..."
+TEST_DB="/tmp/sovereign-bunny-cli-db-$(date +%s)"
 rm -rf "$TEST_DB"
 mkdir -p "$TEST_DB"
 
-./target/debug/sovereign-reth node --dev --datadir "$TEST_DB" --http --http.port 8545 > node_cli_test.log 2>&1 &
+if [ -f "./target/debug/sovereign-bunny" ]; then
+  NODE_BIN="./target/debug/sovereign-bunny"
+elif [ -f "./target/debug/sovereign-reth" ]; then
+  NODE_BIN="./target/debug/sovereign-reth"
+elif [ -f "./target/release/sovereign-bunny" ]; then
+  NODE_BIN="./target/release/sovereign-bunny"
+else
+  NODE_BIN="./target/release/sovereign-reth"
+fi
+
+$NODE_BIN node --dev --datadir "$TEST_DB" --http --http.port 8545 > node_cli_test.log 2>&1 &
 NODE_PID=$!
 
 cleanup() {

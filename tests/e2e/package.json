@@ -11,6 +11,7 @@
   "description": "",
   "dependencies": {
     "@types/node": "^26.1.2",
+    "ethers": "^6.7.0",
     "ts-node": "^10.9.2",
     "typescript": "^7.0.2",
     "viem": "^2.55.10"

@@ -1,0 +1,174 @@
+openapi: 3.1.0
+info:
+  title: Sovereign Reth Node & Account-Lattice Gateway API
+  version: 1.0.0
+  description: >
+    Unified API specification for Sovereign Reth node interactions across
+    JSON-RPC 2.0, REST endpoints, W3C DID resolution, ActivityStreams 2.0,
+    and stateless tri-backend execution.
+
+servers:
+  - url: http://localhost:8545
+    description: Local JSON-RPC Gateway (EVM & Custom bunny_* methods)
+  - url: http://localhost:8548
+    description: Decentralized P2P Storage & Iroh DA Gateway
+
+paths:
+  /:
+    post:
+      summary: JSON-RPC 2.0 Execution Endpoint
+      description: Dispatches standard EVM methods (eth_call, eth_sendRawTransaction) and custom bunny_* lattice methods.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/JsonRpcRequest'
+      responses:
+        '200':
+          description: Successful JSON-RPC response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JsonRpcResponse'
+
+  /blob/{cid}:
+    get:
+      summary: Fetch verified blob content from decentralized cold storage
+      parameters:
+        - name: cid
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "b3:0123456789abcdef..."
+      responses:
+        '200':
+          description: Raw binary blob or DAG-CBOR payload
+          content:
+            application/octet-stream: {}
+            application/cbor: {}
+        '404':
+          description: CID not found in local or peer Iroh store
+
+  /storage_storeBlob:
+    post:
+      summary: Ingest and store arbitrary payload to Iroh P2P storage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [data]
+              properties:
+                data:
+                  type: string
+                  description: Hex-encoded raw binary data to store
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  cid:
+                    type: string
+                    example: "b3:847291aef..."
+                  size:
+                    type: integer
+                  bao_outboard_hash:
+                    type: string
+
+components:
+  schemas:
+    JsonRpcRequest:
+      type: object
+      required: [jsonrpc, method, id]
+      properties:
+        jsonrpc:
+          type: string
+          enum: ["2.0"]
+        method:
+          type: string
+          example: "bunny_resolveDidDocument"
+        params:
+          type: array
+          items: {}
+        id:
+          oneOf:
+            - type: string
+            - type: integer
+
+    JsonRpcResponse:
+      type: object
+      required: [jsonrpc, id]
+      properties:
+        jsonrpc:
+          type: string
+          enum: ["2.0"]
+        result: {}
+        error:
+          type: object
+          properties:
+            code:
+              type: integer
+            message:
+              type: string
+        id:
+          oneOf:
+            - type: string
+            - type: integer
+
+    DidDocument:
+      type: object
+      required: ["@context", id, verificationMethod]
+      properties:
+        "@context":
+          type: array
+          items:
+            type: string
+        id:
+          type: string
+          example: "did:sovereign:13371337:0x1234..."
+        verificationMethod:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+              type:
+                type: string
+              controller:
+                type: string
+              publicKeyMultibase:
+                type: string
+
+    StatelessTransitionFrame:
+      type: object
+      required: [backend_type, from_account, to_account, target_slot, initial_tip, final_tip, execution_payload, proof_witness]
+      properties:
+        backend_type:
+          type: integer
+          description: "1: SgxRevm, 2: NoirUltraHonk, 3: InterfoldE3"
+        from_account:
+          type: string
+          pattern: "^0x[0-9a-fA-F]{40}$"
+        to_account:
+          type: string
+          pattern: "^0x[0-9a-fA-F]{40}$"
+        target_slot:
+          type: integer
+        initial_tip:
+          type: string
+          pattern: "^0x[0-9a-fA-F]{64}$"
+        final_tip:
+          type: string
+          pattern: "^0x[0-9a-fA-F]{64}$"
+        execution_payload:
+          type: string
+          description: Hex-encoded calldata or DAG-CBOR state modification
+        proof_witness:
+          type: string
+          description: Hex-encoded SGX quote, UltraHonk SNARK proof, or DTC MPC signature

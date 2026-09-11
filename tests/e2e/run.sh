@@ -8,13 +8,13 @@ set -euo pipefail
 # Ensure we are in the repository root directory
 cd "$(dirname "$0")/../.."
 
-echo "🛠️  Building Sovereign-Reth..."
-cargo build --bin sovereign-reth --bin did-tool --config 'build.rustc-workspace-wrapper=""' -j 1
+echo "🛠️  Building Sovereign Bunny & bunnyctl..."
+cargo build --bin sovereign-bunny --bin bunny --config 'build.rustc-workspace-wrapper=""' -j 1
 
 # Cleanup function to kill background node
 cleanup() {
     if [ -n "${NODE_PID:-}" ]; then
-        echo "🛑 Stopping Sovereign-Reth node (PID: $NODE_PID)..."
+        echo "🛑 Stopping Sovereign Bunny node (PID: $NODE_PID)..."
         kill "$NODE_PID" || true
         wait "$NODE_PID" 2>/dev/null || true
     fi
@@ -24,11 +24,22 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "🚀 Launching Sovereign-Reth node in dev mode..."
-TEST_DB="/tmp/sovereign-reth-e2e-db-$(date +%s)"
+echo "🚀 Launching Sovereign Bunny node in dev mode..."
+TEST_DB="/tmp/sovereign-bunny-e2e-db-$(date +%s)"
 rm -rf "$TEST_DB"
 mkdir -p "$TEST_DB"
-./target/debug/sovereign-reth node --dev --datadir "$TEST_DB" --http --http.port 8545 > node_e2e.log 2>&1 &
+
+if [ -f "./target/debug/sovereign-bunny" ]; then
+  NODE_BIN="./target/debug/sovereign-bunny"
+elif [ -f "./target/debug/sovereign-reth" ]; then
+  NODE_BIN="./target/debug/sovereign-reth"
+elif [ -f "./target/release/sovereign-bunny" ]; then
+  NODE_BIN="./target/release/sovereign-bunny"
+else
+  NODE_BIN="./target/release/sovereign-reth"
+fi
+
+$NODE_BIN node --dev --datadir "$TEST_DB" --http --http.port 8545 > node_e2e.log 2>&1 &
 NODE_PID=$!
 
 echo "⏳ Waiting for RPC HTTP server to start on port 8545..."

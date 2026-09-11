@@ -11,10 +11,10 @@ const entrypointHex = entrypointBytecode.startsWith('0x')
   ? entrypointBytecode
   : '0x' + entrypointBytecode;
 
-const paymasterBytecode = fs.readFileSync(
-  path.resolve(__dirname, 'contracts', 'out', 'SimplePaymaster.runtime.bin'),
-  'utf8'
-).trim();
+const paymasterOutPath = path.resolve(__dirname, 'contracts', 'out', 'SimplePaymaster.runtime.bin');
+const paymasterSrcPath = path.resolve(__dirname, 'contracts', 'src', 'SimplePaymaster.runtime.bin');
+const paymasterPath = fs.existsSync(paymasterOutPath) ? paymasterOutPath : paymasterSrcPath;
+const paymasterBytecode = fs.readFileSync(paymasterPath, 'utf8').trim();
 
 const paymasterHex = paymasterBytecode.startsWith('0x')
   ? paymasterBytecode

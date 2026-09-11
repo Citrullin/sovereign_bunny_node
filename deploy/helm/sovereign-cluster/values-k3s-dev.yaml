@@ -1,0 +1,60 @@
+# Values for local single-node K3s testing and CI
+global:
+  clusterName: "k3s-local-dev"
+  domain: "bunny.local"
+
+gateway:
+  replicaCount: 1
+  image:
+    repository: localhost/bunny-gateway
+    tag: dev
+    pullPolicy: Never
+  service:
+    type: NodePort
+    httpPort: 8545
+    sszPort: 9000
+
+rpcProxy:
+  replicaCount: 1
+  image:
+    repository: localhost/bunny-rpc
+    tag: dev
+  service:
+    type: NodePort
+    port: 8546
+
+committee:
+  replicaCount: 1
+  partitions:
+    - rangeStart: "0x0000"
+      rangeEnd: "0xFFFF"
+  runtimeClassName: standard
+
+epoch:
+  replicaCount: 1
+  image:
+    repository: localhost/bunny-epoch
+    tag: dev
+
+
+e3Worker:
+  replicaCount: 1
+  image:
+    repository: localhost/bunny-e3
+    tag: dev
+
+iggy:
+  replicaCount: 1
+  image:
+    repository: iggyrs/iggy
+    tag: latest
+  port: 8090
+
+bgp:
+  enabled: true
+  localAs: 65001
+  peerAs: 65000
+  sidecarLoopback: "127.0.0.1"
+  darkFiberPorts:
+    - lo
+  ecmp: false

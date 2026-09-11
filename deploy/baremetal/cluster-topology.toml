@@ -1,0 +1,8 @@
+# Sovereign Bunny Baremetal Topology: sovereign-alpha
+[mesh]
+bgp_asn = 65001
+dpu_offload = true
+wireguard_mesh = true
+
+[nodes]
+node_0 = "127.0.0.1:51820"
