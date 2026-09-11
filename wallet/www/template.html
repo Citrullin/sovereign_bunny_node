@@ -5,9 +5,6 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Sovereign Wallet & local Asset Manager</title>
-    <link href="https://fonts.googleapis.com/css?family=Press+Start+2P" rel="stylesheet">
-    <link href="https://unpkg.com/nes.css@2.3.0/css/nes.min.css" rel="stylesheet" />
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.7.0/ethers.umd.min.js"></script>
     <style>
         /* STYLE_CSS */
     </style>
@@ -66,32 +63,301 @@
         </div>
     </div>
 
+    <!-- Dedicated Unlock Keystore Modal (Web App Native) -->
+    <div id="unlock-modal" class="wizard-overlay" style="display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.85); z-index: 9999; justify-content: center; align-items: center;">
+        <div class="nes-container is-rounded is-dark wizard-card" style="width: 90%; max-width: 480px; padding: 20px; border: 3px solid #66fcf1; box-shadow: 0 0 20px rgba(102, 252, 241, 0.3);">
+            <h2 style="font-size: 1.1rem; color: #66fcf1; text-align: center; margin-bottom: 12px;">🔐 Unlock Sovereign Keystore</h2>
+            <p style="font-size: 0.7rem; color: #ddd; margin-bottom: 12px;">
+                Encrypted storage found for account:<br>
+                <code id="unlock-account-display" style="color: #ff0; font-size: 0.65rem; word-break: break-all;">0x...</code>
+            </p>
+            <div class="nes-field" style="margin-bottom: 15px;">
+                <label for="unlock-password-input" style="font-size: 0.65rem; color: #fff;">Enter Keystore Password:</label>
+                <div style="display: flex; gap: 8px;">
+                    <input type="password" id="unlock-password-input" class="nes-input is-dark" placeholder="Password to decrypt keys" style="font-size: 0.7rem;">
+                    <button class="nes-btn" id="unlock-reveal-pw-btn" type="button" style="padding: 2px 10px;">👁️</button>
+                </div>
+            </div>
+            <div id="unlock-error-msg" style="display: none; color: #ff5555; font-size: 0.65rem; margin-bottom: 12px; background: rgba(255,0,0,0.1); padding: 6px; border: 1px solid #ff5555;"></div>
+            <div style="display: flex; justify-content: space-between; gap: 10px;">
+                <button class="nes-btn is-error" id="unlock-cancel-btn" style="font-size: 0.7rem;">Close</button>
+                <button class="nes-btn is-success" id="unlock-confirm-btn" style="font-size: 0.7rem;">🔓 Decrypt & Unlock</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Native App Dialog / Alert / Confirm Modal (Replaces browser window popups) -->
+    <div id="app-dialog-modal" class="wizard-overlay" style="display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.85); z-index: 10002; justify-content: center; align-items: center; padding: 15px; box-sizing: border-box;">
+        <div class="nes-container is-rounded is-dark wizard-card" style="width: 95%; max-width: 520px; max-height: 85vh; display: flex; flex-direction: column; padding: 20px; border: 3px solid #ffcc00; box-shadow: 0 0 20px rgba(255, 204, 0, 0.3); box-sizing: border-box;">
+            <h3 id="app-dialog-title" style="font-size: 0.95rem; color: #ffcc00; margin-bottom: 10px; flex-shrink: 0;">Notification</h3>
+            <div id="app-dialog-body-container" style="flex: 1 1 auto; overflow-y: auto; overflow-x: hidden; max-height: 55vh; margin-bottom: 16px; padding-right: 5px;">
+                <p id="app-dialog-body" style="font-size: 0.68rem; color: #eee; line-height: 1.5; margin: 0; word-break: break-word; white-space: pre-wrap; font-family: monospace;"></p>
+            </div>
+            <div style="display: flex; justify-content: flex-end; gap: 10px; flex-shrink: 0; border-top: 1px solid #333; padding-top: 10px;">
+                <button class="nes-btn is-error" id="app-dialog-cancel-btn" style="display: none; font-size: 0.7rem;">Cancel</button>
+                <button class="nes-btn is-primary" id="app-dialog-ok-btn" style="font-size: 0.7rem;">OK</button>
+            </div>
+        </div>
+    </div>
+
     <div class="container">
-        <header
-            style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 30px; border-bottom: 4px solid #fff; padding-bottom: 10px;">
-            <h1 style="font-size: 1.5rem; margin: 0; color: #ff0;">🕹️ Sovereign Wallet</h1>
-            <div style="display: flex; align-items: center; gap: 20px;">
-                <button class="nes-btn is-error" id="active-wallet-address"
-                    style="padding: 2px 8px; font-size: 0.7rem;">Rabby: Disconnected</button>
-                <div class="nav-links" style="display: flex; gap: 10px;">
-                    <a href="#overview" class="nes-btn is-success"
-                        style="padding: 2px 8px; font-size: 0.7rem;">Profile</a>
-                    <a href="#catalog" class="nes-btn is-warning"
-                        style="padding: 2px 8px; font-size: 0.7rem;">Market</a>
+        <header style="margin-bottom: 25px; border-bottom: 4px solid #fff; padding-bottom: 15px;">
+            <!-- Top Bar: Logo, Badges, and Wallet Status -->
+            <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 15px;">
+                <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
+                    <h1 style="font-size: 1.4rem; margin: 0; color: #ff0;"><i class="nes-icon is-small is-star"></i> Sovereign Wallet</h1>
+                    <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
+                        <span id="header-api-badge" class="nes-badge" style="font-size: 0.55rem;"><span class="is-primary">API: Legacy</span></span>
+                        <span id="header-wrap-badge" class="nes-badge" style="font-size: 0.55rem;"><span class="is-warning">Wrap: Quantum</span></span>
+                        <span id="header-security-badge" class="nes-badge" style="font-size: 0.55rem;"><span class="is-success">PQ: Secure</span></span>
+                    </div>
+                </div>
+                <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+                    <button class="nes-btn is-primary" id="open-settings-btn" style="padding: 3px 10px; font-size: 0.65rem;">⚙️ Settings</button>
+                    <button class="nes-btn is-error" id="active-wallet-address" style="padding: 3px 10px; font-size: 0.7rem;">Rabby: Disconnected</button>
                 </div>
             </div>
         </header>
 
-        <div class="grid">
+        <!-- Full-Width Horizontal Navigation Deck -->
+        <div class="main-nav-container">
+            <nav class="main-nav-tabs" id="main-nav-tabs">
+                <button type="button" class="tab-btn active" data-tab="tab-profile">👤 Identity</button>
+                <button type="button" class="tab-btn" data-tab="tab-activitypub">🌌 Fediverse</button>
+                <button type="button" class="tab-btn" data-tab="tab-explorer">⛓️ Explorer</button>
+                <button type="button" class="tab-btn" data-tab="tab-market">🖼️ Market</button>
+                <button type="button" class="tab-btn" data-tab="tab-storage" id="nav-tab-storage" style="display: none;">💾 Storage</button>
+                <button type="button" class="tab-btn" data-tab="tab-debugger" id="nav-tab-debugger" style="display: none;">🐞 Debugger</button>
+            </nav>
+        </div>
+
+        <!-- Insecure Account Warning Banner -->
+        <div id="legacy-warning-banner" style="display: none; background: linear-gradient(90deg, #b35900 0%, #990000 100%); color: #fff; padding: 10px 16px; border-radius: 6px; margin-bottom: 20px; font-size: 0.75rem; border: 2px solid #ff5555; box-shadow: 0 4px 10px rgba(0,0,0,0.5);">
+            <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px;">
+                <div>
+                    <span>⚠️ <b>NON POST-QUANTUM SECURE ACCOUNT:</b> This address has <code>ALLOW_LEGACY=true</code>. Classical ECDSA signatures can be cracked by quantum computers.</span>
+                </div>
+                <button id="banner-upgrade-pq-btn" class="nes-btn is-warning" style="padding: 4px 10px; font-size: 0.65rem;">🛡️ Upgrade to Quantum Secure</button>
+            </div>
+        </div>
+
+        <!-- Dual-Signature Post-Quantum Confirmation Modal -->
+        <div id="pq-sign-modal" style="display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.85); z-index: 10001; justify-content: center; align-items: center;">
+            <div class="nes-container is-dark with-title" style="width: 90%; max-width: 620px; max-height: 90vh; overflow-y: auto; border: 4px solid #66fcf1; border-radius: 0 !important; box-shadow: 0 4px #000;">
+                <p class="title" style="color: #66fcf1; font-family: 'Press Start 2P', monospace;">🛡️ Sovereign In-Wallet Signer</p>
+                <div style="font-size: 0.75rem; color: #fff;">
+                    <p style="color: #ff0; font-size: 0.65rem; margin-bottom: 12px; font-family: 'Press Start 2P', monospace; line-height: 1.5;">
+                        A transaction or state-change requires authorization from your <b>Post-Quantum Sovereign Identity</b> (ML-DSA-65).
+                    </p>
+                    <div style="background: #111; padding: 10px; border: 2px solid #444; margin-bottom: 12px; font-family: monospace; font-size: 0.65rem; line-height: 1.6;">
+                        <div style="margin-bottom: 4px;"><span style="color: #888;">Request Type:</span> <span id="pq-modal-type" style="color: #66fcf1; font-weight: bold;">Quantum-Wrapped Precompile Call</span></div>
+                        <div style="margin-bottom: 4px;"><span style="color: #888;">Target:</span> <span id="pq-modal-target" style="color: #fff; word-break: break-all;">0x...</span></div>
+                        <div style="margin-bottom: 4px;"><span style="color: #888;">Key Scheme:</span> <span id="pq-modal-scheme" style="color: #55ff55;">ML-DSA-65 (NIST FIPS 204)</span></div>
+                        <div style="margin-bottom: 4px;"><span style="color: #888;">Signer Account:</span> <span id="pq-modal-caller" style="color: #aaa; word-break: break-all;">0x...</span></div>
+                        <div style="margin-bottom: 4px;"><span style="color: #888;">Description:</span> <span id="pq-modal-summary" style="color: #ffcc00;">Wrap Precompile Payload</span></div>
+                        <div style="margin-bottom: 4px;"><span style="color: #888;">Calldata Hash:</span> <span id="pq-modal-calldata-hash" style="color: #888; font-size: 0.6rem;">0x...</span></div>
+                        <div id="pq-modal-calldata-preview-row" style="margin-top: 6px;">
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+                                <span style="color: #888;">Calldata Payload:</span>
+                                <div class="payload-view-toggle">
+                                    <button type="button" class="nes-btn is-primary" id="pq-modal-toggle-structured-btn">Structured</button>
+                                    <button type="button" class="nes-btn" id="pq-modal-toggle-raw-btn">Raw</button>
+                                </div>
+                            </div>
+                            <div id="pq-modal-structured" class="structured-payload-container" style="display: block;">
+                                <!-- Decoded parameter table -->
+                            </div>
+                            <pre id="pq-modal-calldata-preview" style="display: none; max-height: 80px; overflow-y: auto; background: #000; color: #a8ffb2; padding: 4px; font-size: 0.58rem; word-break: break-all; margin: 4px 0 0 0;"></pre>
+                        </div>
+                    </div>
+                    <div style="display: flex; gap: 10px; justify-content: flex-end;">
+                        <button type="button" id="pq-modal-reject-btn" class="nes-btn is-error" style="font-size: 0.7rem;">❌ Reject</button>
+                        <button type="button" id="pq-modal-approve-btn" class="nes-btn is-success" style="font-size: 0.7rem;">🛡️ Authorize & Sign</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Transaction Details Modal (Full Inspection & Deep Link) -->
+        <div id="tx-details-modal" style="display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.85); z-index: 10002; justify-content: center; align-items: center; padding: 20px; box-sizing: border-box;">
+            <div class="nes-container is-dark with-title" style="width: 100%; max-width: 700px; max-height: 90vh; display: flex; flex-direction: column; overflow: visible; border: 4px solid #fff; border-radius: 0 !important; box-shadow: 0 6px #000; padding: 25px 15px 15px 15px; position: relative; background: #212529;">
+                <p class="title" style="color: #f7d51d; font-family: 'Press Start 2P', monospace; font-size: 0.72rem; margin-top: -38px; background: #212529; padding: 0 10px; display: inline-block;">📜 Transaction Details</p>
+                <div class="modal-body-scroll" style="overflow-y: auto; overflow-x: hidden; max-height: 75vh; padding-right: 6px; font-size: 0.7rem; color: #fff; line-height: 1.6;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; border-bottom: 2px solid #333; padding-bottom: 8px;">
+                        <div>
+                            <span id="tx-details-type-badge" class="nes-badge"><span class="is-primary">TX</span></span>
+                            <span id="tx-details-status-badge" class="nes-badge"><span class="is-success">Settled</span></span>
+                        </div>
+                        <div style="color: #aaa; font-size: 0.65rem;" id="tx-details-epoch-time">Epoch -</div>
+                    </div>
+
+                    <div style="background: #111; padding: 10px; border: 2px solid #444; margin-bottom: 12px; font-family: monospace; font-size: 0.65rem;">
+                        <div style="margin-bottom: 6px;">
+                            <span style="color: #888;">Transaction Hash:</span><br>
+                            <span id="tx-details-hash" style="color: #66fcf1; word-break: break-all; font-weight: bold;">-</span>
+                        </div>
+                        <div style="margin-bottom: 6px;">
+                            <span style="color: #888;">Sender / Account:</span><br>
+                            <span id="tx-details-from" style="color: #fff; word-break: break-all;">-</span>
+                        </div>
+                        <div style="margin-bottom: 6px;">
+                            <span style="color: #888;">Counterparty / Receiver:</span><br>
+                            <span id="tx-details-to" style="color: #ff0; word-break: break-all;">-</span>
+                        </div>
+                        <div style="margin-bottom: 6px;">
+                            <span style="color: #888;">Value / Amount:</span><br>
+                            <span id="tx-details-amount" style="color: #55ff55; font-weight: bold;">-</span>
+                        </div>
+                        <div style="margin-bottom: 6px;">
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+                                <span style="color: #888;">Payload / Calldata:</span>
+                                <div class="payload-view-toggle">
+                                    <button type="button" class="nes-btn is-primary" id="tx-details-toggle-structured-btn">Structured</button>
+                                    <button type="button" class="nes-btn" id="tx-details-toggle-raw-btn">Raw Hex</button>
+                                </div>
+                            </div>
+                            <div id="tx-details-structured" class="structured-payload-container" style="display: block;">
+                                <!-- Dynamically populated structured decoder table -->
+                            </div>
+                            <pre id="tx-details-calldata" style="display: none; background: #000; padding: 8px; border: 1px solid #333; color: #a8ffb2; max-height: 120px; overflow-y: auto; overflow-x: hidden; white-space: pre-wrap !important; word-wrap: break-word !important; word-break: break-all !important; margin-top: 4px; font-size: 0.62rem; line-height: 1.4;"></pre>
+                        </div>
+                    </div>
+
+                    <div style="display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap;">
+                        <button type="button" class="nes-btn is-primary" id="tx-details-debug-btn" style="font-size: 0.65rem;">🐞 Inspect in Debugger</button>
+                        <button type="button" class="nes-btn is-warning" id="tx-details-copy-link-btn" style="font-size: 0.65rem;">🔗 Copy Link</button>
+                        <button type="button" class="nes-btn" id="tx-details-close-btn" style="font-size: 0.65rem;">✖️ Close</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Non-blocking Toast Notification Mount Point -->
+        <div id="nes-toast-container"></div>
+
+        <!-- Settings Modal -->
+        <div id="settings-modal" style="display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.85); z-index: 10000; justify-content: center; align-items: center;">
+            <div class="nes-container is-dark with-title" style="width: 90%; max-width: 580px; max-height: 90vh; overflow-y: auto;">
+                <p class="title">⚙️ API Protocol & Cryptography Settings</p>
+                <div style="font-size: 0.7rem;">
+                    <!-- Developer Mode Toggle & Warning -->
+                    <div id="setting-dev-mode-toggle-container" style="margin-bottom: 15px; padding: 10px; background: #1a1600; border: 2px solid #ffcc00;">
+                        <label style="color: #ffcc00; display: block; margin-bottom: 5px; font-weight: bold;">🛠️ Developer Options:</label>
+                        <label style="display: flex; align-items: center; gap: 10px; cursor: pointer;">
+                            <input type="checkbox" class="nes-checkbox is-dark" id="setting-dev-mode-checkbox">
+                            <span style="font-size: 0.65rem; color: #fff;">Enable Developer Mode</span>
+                        </label>
+                        <div id="setting-dev-mode-warning" class="dev-mode-warning-box" style="display: none;">
+                            ⚠️ <b>WARNING:</b> Developer mode exposes experimental CAIP-25/gRPC streaming, bare-metal bytecode debugging, Iroh DA storage uploads, and cache purging controls.
+                        </div>
+                    </div>
+
+                    <!-- API Protocol Architecture (Gated behind Developer Mode) -->
+                    <div class="nes-field" id="setting-api-mode-container" style="margin-bottom: 15px; display: none;">
+                        <label for="setting-api-mode" style="color: #ff0;">API Protocol Architecture:</label>
+                        <div class="nes-select is-dark">
+                            <select id="setting-api-mode" style="font-size: 0.65rem;">
+                                <option value="legacy" selected>Legacy API (EVM Bytecode Precompiles / EIP-1193)</option>
+                                <option value="modern">Modern API (CAIP-25 / gRPC over HTTP-3 / CBOR)</option>
+                            </select>
+                        </div>
+                        <span style="font-size: 0.6rem; color: #888;">Legacy API runs via standard EVM bytecode transactions. Modern API uses high-speed CAIP/gRPC streaming.</span>
+                    </div>
+
+                    <!-- Quantum Wrapping Toggle (Conditional on Legacy API) -->
+                    <div id="setting-wrap-container" style="margin-bottom: 15px; padding: 10px; background: #111; border: 1px solid #444;">
+                        <label style="color: #ff0; display: block; margin-bottom: 5px;">Cryptographic Execution Mode (Legacy API):</label>
+                        <div class="nes-select is-dark" style="margin-bottom: 5px;">
+                            <select id="setting-crypto-wrap" style="font-size: 0.65rem;">
+                                <option value="wrapped" selected>Quantum Wrapper (Zero-Touch Post-Quantum Settlement)</option>
+                                <option value="pure">Legacy Pure Crypto (EIP-712 Structured Rabby/MetaMask Signing)</option>
+                            </select>
+                        </div>
+                        <span id="setting-wrap-hint" style="font-size: 0.6rem; color: #66fcf1;">Quantum Wrapper settles lattice blocks via in-WASM ML-DSA without wallet popups; Pure mode requests EIP-712 signatures.</span>
+                    </div>
+
+                    <!-- Modern API Explanation -->
+                    <div id="setting-modern-note" style="display: none; margin-bottom: 15px; padding: 10px; background: #002b36; border: 1px solid #2aa198;">
+                        <span style="color: #2aa198; font-weight: bold;">⚡ Modern CAIP-25 / gRPC Mode Active:</span><br>
+                        <span style="font-size: 0.6rem; color: #eee;">Post-Quantum state transitions are dispatched natively via StatelessTransitionFrames over HTTP/3 (QUIC). No outer Secp256k1 wrapper needed!</span>
+                    </div>
+
+                    <!-- Account Security Policy: ALLOW_LEGACY Toggle -->
+                    <div id="setting-legacy-policy-container" style="margin-bottom: 15px; padding: 10px; background: #111; border: 1px solid #444;">
+                        <label style="color: #ff0; display: block; margin-bottom: 5px;">Account Security Policy (ALLOW_LEGACY):</label>
+                        <label style="display: flex; align-items: center; gap: 10px; cursor: pointer;">
+                            <input type="checkbox" class="nes-checkbox is-dark" id="setting-allow-legacy-checkbox">
+                            <span style="font-size: 0.65rem;">Permit Classical Secp256k1 Transactions (ALLOW_LEGACY=true)</span>
+                        </label>
+                        <span style="font-size: 0.6rem; color: #ff5555; display: block; margin-top: 4px;">⚠️ WARNING: Enabling this allows transactions without post-quantum signatures. Sovereign defaults to strict post-quantum security.</span>
+                    </div>
+
+                    <!-- Lattice Send Auto-Reclaim Timeout (Epochs) -->
+                    <div class="nes-field" style="margin-bottom: 15px;">
+                        <label for="setting-reclaim-timeout-input" style="color: #ff0;">Lattice Send Auto-Reclaim Timeout (Epochs):</label>
+                        <input type="number" id="setting-reclaim-timeout-input" class="nes-input is-dark" min="1" max="1000" value="10" style="font-size: 0.65rem;">
+                        <span style="color: #aaa; font-size: 0.6rem;">Unclaimed send transactions can be reclaimed by sender after this many epochs (32 blocks/epoch). Default: 10 epochs.</span>
+                    </div>
+
+                    <!-- Native Currency Ticker Configuration -->
+                    <div class="nes-field" style="margin-bottom: 15px;">
+                        <label for="setting-currency-ticker" style="color: #ff0;">Native Currency Ticker:</label>
+                        <input type="text" id="setting-currency-ticker" class="nes-input is-dark" value="TBL" style="font-size: 0.65rem;" placeholder="TBL">
+                        <span style="color: #aaa; font-size: 0.6rem;">Configure display ticker for native balance and transactions (Default: TBL).</span>
+                    </div>
+
+                    <!-- Custom Endpoints -->
+                    <div class="nes-field" style="margin-bottom: 10px;">
+                        <label for="rpc-endpoint-input">Lattice JSON-RPC Endpoint:</label>
+                        <input type="text" id="rpc-endpoint-input" class="nes-input is-dark" value="http://localhost:8545" style="font-size: 0.65rem;">
+                    </div>
+                    <div class="nes-field" style="margin-bottom: 15px;">
+                        <label for="storage-endpoint-input">Iroh Storage DA Port:</label>
+                        <input type="text" id="storage-endpoint-input" class="nes-input is-dark" value="http://localhost:8548" style="font-size: 0.65rem;">
+                    </div>
+
+                    <!-- Dev Tools & Instance Cache Reset -->
+                    <div id="setting-dev-container" style="margin-bottom: 15px; padding: 10px; background: #1a1010; border: 1px dashed #ff5555;">
+                        <label style="color: #ff5555; display: block; margin-bottom: 5px; font-weight: bold;">🛠️ Developer Mode & Cache Management:</label>
+                        <span style="color: #bbb; font-size: 0.6rem; display: block; margin-bottom: 8px;">Purges temporary activitypub outbox cache, transaction history, nonces, and unconfirmed states. <strong>Preserves your encrypted keystores, private keys, and addresses.</strong></span>
+                        <button type="button" class="nes-btn is-error" id="dev-clear-instance-data-btn" style="width: 100%; font-size: 0.65rem;">🧹 Clear Instance / Cache Data</button>
+                    </div>
+
+                    <div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px;">
+                        <button class="nes-btn is-primary" id="save-settings-btn" style="font-size: 0.7rem;">Save & Close</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- TAB 1: Profile & Identity -->
+        <div id="tab-profile" class="tab-pane active">
+            <div class="page-hero-header">
+                <div>
+                    <h2>👤 Sovereign Identity & zkOIDC Profile</h2>
+                    <p>Post-Quantum DID Registry (Slot 0x03), zero-knowledge compliance tickets & deterministic identity keys.</p>
+                </div>
+                <div id="profile-page-status" class="slot-status-container">
+                    <span class="nes-badge"><span class="is-disabled" id="profile-slot-badge">Slot 0x03 Unmounted</span></span>
+                    <span class="slot-root-link" id="profile-slot-root-link">Tip: <a href="#explorer" id="profile-slot-root-a">0x0 (Unmounted)</a> <span class="slot-update-count" id="profile-slot-count">(0 updates)</span></span>
+                </div>
+            </div>
+
             <!-- 2. Account Overview -->
             <div class="nes-container with-title is-dark" id="overview" style="margin-bottom: 20px;">
-                <p class="title">👤 Identity Profile</p>
+                <p class="title">👤 Identity & zkOIDC Profile</p>
                 <div style="font-size: 0.7rem;">
                     <div style="margin-bottom: 15px;">
                         <label style="color: #ff0;">DID URI:</label>
                         <div id="did-display"
                             style="word-break: break-all; background: #000; padding: 10px; border: 2px solid #fff;">
                             Uninitialized</div>
+                    </div>
+                    <div style="margin-bottom: 15px;">
+                        <label style="color: #ff0;">WebFinger Handle:</label>
+                        <div id="webfinger-display"
+                            style="word-break: break-all; background: #000; padding: 8px; border: 2px solid #66fcf1; color: #66fcf1;">
+                            @user@manifold.mesh</div>
                     </div>
                     <div style="margin-bottom: 15px;">
                         <label style="color: #ff0;">Primary EVM:</label>
@@ -102,7 +368,7 @@
                     <div style="margin-bottom: 15px;">
                         <label style="color: #ff0;">Sovereign RPC Endpoint:</label>
                         <input type="text" id="rpc-endpoint-input" class="nes-input is-dark"
-                            value="http://localhost:8546" style="font-size: 0.65rem; padding: 5px 10px;">
+                            value="http://localhost:8545" style="font-size: 0.65rem; padding: 5px 10px;">
                     </div>
                     <div
                         style="margin-bottom: 15px; display: flex; justify-content: space-between; align-items: center;">
@@ -114,66 +380,758 @@
                         <span>Key Tier:</span>
                         <span id="tier-display" class="nes-badge"><span class="is-success">Classical</span></span>
                     </div>
-                    <div style="margin-top: 20px; display: flex; flex-direction: column; gap: 15px;">
-                        <button class="nes-btn is-error" id="register-did-btn" disabled>🌐 Register DID on
-                            Chain</button>
-                        <button class="nes-btn is-success" id="export-backup-btn" disabled>📥 Export Keystore (File
-                            API)</button>
-                        <button class="nes-btn is-error" id="reset-profiles-btn" onclick="clearLocalProfiles()">⚠️ Reset
-                            Local Profiles</button>
+                    <div style="margin-bottom: 15px; display: flex; justify-content: space-between; align-items: center; background: #111; padding: 6px 10px; border: 1px solid #444;">
+                        <span style="color: #ff0;">Settled Lattice Balance:</span>
+                        <span id="lattice-balance-display" style="color: #66fcf1; font-weight: bold; font-size: 0.75rem;">0.00 TBL</span>
                     </div>
-                </div>
-            </div>
-
-            <!-- Block-Lattice Claim Inbox -->
-            <div class="nes-container with-title is-dark" id="inbox-container" style="margin-bottom: 20px;">
-                <p class="title">📥 Claim Inbox (Block-Lattice)</p>
-                <div style="font-size: 0.7rem;">
-                    <p style="font-size: 0.65rem; color: #ff0;">Claim incoming transfers to settle your balance
-                        on-chain:</p>
-                    <div id="inbox-list" style="margin-top: 10px; display: flex; flex-direction: column; gap: 10px;">
-                        <p style="font-size: 0.65rem;">No pending claims detected.</p>
+                    <div style="margin-top: 15px; border-top: 1px solid #444; padding-top: 10px;">
+                        <label for="public-did-lookup-addr" style="font-size: 0.65rem; color: #ff0;">🔍 Request / Lookup Public DID (Stateless RPC / Iroh):</label>
+                        <div style="display: flex; gap: 8px; margin-top: 5px;">
+                            <input type="text" id="public-did-lookup-addr" class="nes-input is-dark" placeholder="0x... or did:sovereign:..." style="font-size: 0.65rem; flex: 1;">
+                            <button class="nes-btn is-primary" id="public-did-lookup-btn" style="font-size: 0.65rem; white-space: nowrap;">Fetch DID</button>
+                        </div>
+                        <div id="public-did-lookup-result" style="display: none; margin-top: 8px; background: #000; padding: 8px; border: 1px solid #666; font-size: 0.6rem; max-height: 140px; overflow-y: auto; color: #66fcf1; word-break: break-all;"></div>
+                    </div>
+                    <div style="margin-top: 15px; display: flex; flex-direction: column; gap: 10px;">
+                        <button class="nes-btn is-error" id="register-did-btn" disabled>🌐 Register DID on Chain (0x03)</button>
+                        <!-- Map zkOIDC to SIWE Session (pending full implementation & testing)
+                        <button class="nes-btn is-primary" id="zkoidc-siwe-btn">🔑 Map zkOIDC to SIWE Session</button>
+                        <div id="zkoidc-result" style="display: none; background: #0b132b; padding: 8px; font-size: 0.6rem; color: #66fcf1; border: 1px solid #1c2541;"></div>
+                        -->
+                        <button class="nes-btn is-success" id="export-backup-btn" disabled style="display: none;">📥 Export Keystore (File API)</button>
+                        <button class="nes-btn is-warning" id="import-keys-btn">🔑 Import Private Keys / Keystore</button>
+                        <button class="nes-btn is-error" id="reset-profiles-btn" onclick="clearLocalProfiles()">⚠️ Reset Local Profiles</button>
                     </div>
                 </div>
             </div>
 
             <!-- Jurisdiction Configuration -->
             <div class="nes-container with-title is-dark" id="jurisdiction-container" style="margin-bottom: 20px;">
-                <p class="title">⚖️ Jurisdiction & Compliance</p>
+                <p class="title">⚖️ Ephemeral Ingress ZK-Compliance</p>
                 <div style="font-size: 0.7rem;">
-                    <p style="font-size: 0.65rem; color: #ff0;">Self-declare compliance credentials (Q1/Q2 quadrants):
-                    </p>
-                    <div id="jurisdiction-options"
-                        style="margin: 10px 0; display: flex; flex-direction: column; gap: 8px;">
+                    <p style="font-size: 0.65rem; color: #ff0;">Ephemeral SMT non-inclusion ticket (Zero On-Chain Taint):</p>
+                    <div id="jurisdiction-options" style="margin: 10px 0; display: flex; flex-direction: column; gap: 8px;">
                         <!-- Dynamic checkboxes loaded via SYSTEM_JURISDICTION -->
                     </div>
-                    <button class="nes-btn is-primary" id="update-jurisdiction-btn"
-                        style="width: 100%; font-size: 0.75rem;">⚖️ Set Jurisdiction</button>
-                </div>
-            </div>
-
-            <!-- 3. Catalog / Marketplace -->
-            <div class="nes-container with-title is-dark" id="catalog" style="margin-bottom: 20px;">
-                <p class="title">🛒 NFT Intent Marketplace</p>
-                <p style="font-size: 0.75rem;">Observe live rates and buy directly using Arbitrum ETH, Base USDC, or
-                    Gnosis EURe.</p>
-
-                <div class="nft-grid" id="catalog-list" style="margin-top: 20px;">
-                    <!-- Dynamic Catalog Items -->
+                    <button class="nes-btn is-primary" id="update-jurisdiction-btn" style="width: 100%; font-size: 0.75rem;">⚖️ Set Ingress Compliance Ticket</button>
                 </div>
             </div>
         </div>
 
-        <!-- 4. Owned Assets & NFC writer -->
-        <section id="assets" class="nes-container with-title is-dark" style="margin-top: 40px;">
-            <p class="title">🖼️ My Owned Assets & e-Paper Flasher</p>
-            <p style="font-size: 0.75rem;">Manage locally owned NFTs, download e-paper image frames, or flash to epaper
-                displays.</p>
-
-            <div class="nft-grid" id="owned-list" style="margin-top: 20px;">
-                <!-- Dynamic Owned Items -->
+        <!-- TAB 2: Fediverse & ActivityPub Outbox -->
+        <div id="tab-activitypub" class="tab-pane">
+            <div class="page-hero-header">
+                <div>
+                    <h2>🌌 Fediverse & ActivityPub Outbox</h2>
+                    <p>Decentralized W3C ActivityPub Actor (Slot 0x05 / CMS 0xF1) federated with Mastodon, Lemmy & Firefish.</p>
+                </div>
+                <div id="ap-page-status" class="slot-status-container">
+                    <span class="nes-badge"><span class="is-disabled" id="ap-slot-badge">Slot 0x05 Unmounted</span></span>
+                    <span class="slot-root-link" id="ap-slot-root-link">Tip: <a href="#explorer" id="ap-slot-root-a">0x0 (Unmounted)</a> <span class="slot-update-count" id="ap-slot-count">(0 updates)</span></span>
+                </div>
             </div>
-        </section>
+
+            <!-- Mastodon & Fediverse Federation Gateway -->
+            <div class="nes-container with-title is-dark" style="margin-bottom: 20px; border: 2px solid #209cee;">
+                <p class="title" style="color: #209cee;">📡 Fediverse & Mastodon Federation Gateway</p>
+                <div style="font-size: 0.7rem;">
+                    <p style="font-size: 0.65rem; color: #ddd; line-height: 1.5; margin-bottom: 10px;">
+                        Every Sovereign account functions as a decentralized W3C ActivityStreams 2.0 Actor. Any Mastodon, Lemmy, or Firefish instance can follow your on-chain outbox without centralized relays.
+                    </p>
+                    <div style="background: #111; padding: 10px; border: 1px solid #444; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
+                        <div>
+                            <span style="color: #ff0; font-size: 0.65rem;">Follow Handle for Mastodon / Fediverse:</span><br>
+                            <code id="ap-mastodon-handle" style="color: #66fcf1; font-size: 0.75rem; word-break: break-all;">@user@manifold.mesh</code>
+                        </div>
+                        <button class="nes-btn is-primary" id="copy-ap-handle-btn" style="padding: 3px 8px; font-size: 0.6rem;">📋 Copy Handle</button>
+                    </div>
+                    <span style="color: #aaa; font-size: 0.6rem;">
+                        💡 How it works: Posts are signed with your Post-Quantum keys on Account-Lattice slot <code>0xF1</code>, blob media is pinned via Iroh decentralized storage, and external gateways resolve you via WebFinger.
+                    </span>
+                </div>
+            </div>
+
+            <!-- ActivityPub Outbox Composer -->
+            <div class="nes-container with-title is-dark" id="activitypub" style="margin-bottom: 20px;">
+                <p class="title">🌌 Fediverse & ActivityPub Outbox</p>
+                <div style="font-size: 0.7rem;">
+                    <div style="margin-bottom: 12px; padding: 8px; background: #111; border: 1px solid #444; display: flex; justify-content: space-between; align-items: center;">
+                        <div>
+                            <span style="color: #ff0;">ActivityPub Slot (0x05):</span>
+                            <span id="ap-slot-status-badge" style="color: #f7d51d; margin-left: 6px;">Unchecked</span>
+                        </div>
+                        <button class="nes-btn is-warning" id="bootstrap-ap-slot-btn" style="padding: 2px 8px; font-size: 0.6rem;">⚙️ Mount Slot 0x05</button>
+                    </div>
+                    <p style="font-size: 0.65rem; color: #ff0;">Federate W3C ActivityStreams 2.0 via Account-Lattice Outbox (0xF1):</p>
+                    <div class="nes-field" style="margin-bottom: 10px;">
+                        <label for="ap-content-input">Post Content / Note:</label>
+                        <textarea id="ap-content-input" class="nes-textarea is-dark" style="font-size: 0.65rem;" placeholder="Hello Fediverse from Sovereign Account-Lattice!"></textarea>
+                    </div>
+                    <div class="nes-field" style="margin-bottom: 5px;">
+                        <label for="ap-media-file">Attach Media for this Post (Optional):</label>
+                        <input type="file" id="ap-media-file" class="nes-input is-dark" style="font-size: 0.65rem;">
+                    </div>
+                    <div class="nes-field" style="margin-bottom: 10px;">
+                        <label for="ap-media-cid">Attached Iroh Media CID (or paste existing):</label>
+                        <input type="text" id="ap-media-cid" class="nes-input is-dark" placeholder="b3:0123456789abcdef..." style="font-size: 0.65rem;">
+                    </div>
+                    <div class="nes-field" style="margin-bottom: 10px;">
+                        <label for="ap-tip-input">Attached Micro-Payment (Atomic Units):</label>
+                        <input type="number" id="ap-tip-input" class="nes-input is-dark" value="0" style="font-size: 0.65rem;">
+                    </div>
+                    <div style="display: flex; gap: 10px; margin-bottom: 15px; align-items: flex-end;">
+                        <div class="nes-field" style="flex: 1;">
+                            <label for="ap-pin-duration">📌 Iroh Pinning Lease:</label>
+                            <div class="nes-select is-dark">
+                                <select id="ap-pin-duration" style="font-size: 0.65rem; padding: 4px 6px;">
+                                    <option value="1">1 Year (0.01 TBL / MB)</option>
+                                    <option value="2">2 Years (0.02 TBL / MB)</option>
+                                    <option value="5" selected>5 Years (0.05 TBL / MB)</option>
+                                    <option value="10">10 Years (0.10 TBL / MB)</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div style="flex: 1; font-size: 0.6rem; color: #ffcc00; padding-bottom: 6px;" id="ap-pin-fee-display">
+                            Est. Pinning Fee: ~0.0005 TBL
+                        </div>
+                    </div>
+                    <button class="nes-btn is-primary" id="publish-activitypub-btn" style="width: 100%; font-size: 0.7rem;">🚀 Sign & Publish ActivityPub Note (0xF1)</button>
+                    <div id="ap-status-log" style="margin-top: 10px; background: #000; padding: 8px; font-size: 0.6rem; color: #92cc41; max-height: 120px; overflow-y: auto; border: 1px solid #444;">
+                        Outbox ready.
+                    </div>
+                </div>
+            </div>
+
+            <!-- Published Feed -->
+            <div class="nes-container with-title is-dark" style="margin-bottom: 20px;">
+                <p class="title">📜 Published Outbox Feed</p>
+                <div id="ap-feed-container" style="display: flex; flex-direction: column; gap: 8px; font-size: 0.65rem;">
+                    <p style="color: #888;">No notes published for this address yet.</p>
+                </div>
+            </div>
+
+            <!-- Discover & Read Address Feed -->
+            <div class="nes-container with-title is-dark" style="margin-bottom: 20px; border: 2px solid #209cee;">
+                <p class="title" style="color: #209cee;">🔍 Read Address Feed & Subscribe (Slot 0x54)</p>
+                <div style="font-size: 0.7rem;">
+                    <p style="font-size: 0.65rem; color: #ff0;">Read any account's ActivityPub feed directly from the decentralized lattice:</p>
+                    <div style="display: flex; gap: 8px; margin-bottom: 10px; align-items: stretch;">
+                        <input type="text" id="ap-search-addr-input" class="nes-input is-dark" placeholder="Enter 0x... address or DID" style="flex: 3; font-size: 0.65rem; height: 44px; box-sizing: border-box;">
+                        <button class="nes-btn is-primary" id="ap-search-addr-btn" style="flex: 1; font-size: 0.65rem; height: 44px; display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box;">📖 Read Feed</button>
+                        <button class="nes-btn is-warning" id="ap-subscribe-addr-btn" style="flex: 1; font-size: 0.65rem; height: 44px; display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box;">📡 Subscribe</button>
+                    </div>
+                    <div id="ap-search-feed-container" style="display: flex; flex-direction: column; gap: 6px; font-size: 0.65rem;">
+                        <p style="color: #888;">Enter an address above or click any actor link to inspect their outbox.</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Global Network Timeline Feed -->
+            <div class="nes-container with-title is-dark" style="margin-bottom: 20px;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                    <p class="title" style="margin: 0;">🌐 Decentralized Mesh Activity Timeline</p>
+                    <button class="nes-btn" id="ap-refresh-network-btn" style="padding: 2px 6px; font-size: 0.6rem;">🔄 Refresh Network Feed</button>
+                </div>
+                <div id="ap-network-feed-container" style="display: flex; flex-direction: column; gap: 6px; font-size: 0.65rem;">
+                    <p style="color: #888;">Loading network timeline...</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- TAB 3: Account-Lattice Explorer & History -->
+        <div id="tab-explorer" class="tab-pane">
+            <div class="page-hero-header">
+                <div>
+                    <h2>⛓️ Account-Lattice Ledger Explorer</h2>
+                    <p>Real-time micro-chain ledger, thread heights, async settlement inbox & configurable reclaim timelocks.</p>
+                </div>
+                <div id="explorer-page-status" class="slot-status-container">
+                    <span class="nes-badge"><span class="is-disabled" id="explorer-slot-badge">Slot 0x0100 Unmounted</span></span>
+                    <span class="slot-root-link" id="explorer-slot-root-link">Tip: <a href="#explorer" id="explorer-slot-root-a">0x0 (Unmounted)</a> <span class="slot-update-count" id="explorer-slot-count">(0 updates)</span></span>
+                </div>
+            </div>
+            <!-- Lattice Status Metrics -->
+            <div class="nes-container with-title is-dark" style="margin-bottom: 20px; border: 2px solid #f7d51d;">
+                <p class="title" style="color: #f7d51d;">⛓️ Sovereign Account-Lattice Metrics</p>
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 15px; font-size: 0.7rem;">
+                    <div style="background: #111; padding: 10px; border: 1px solid #333;">
+                        <span style="color: #888; font-size: 0.6rem;">Account Height (0x100):</span><br>
+                        <span id="explorer-lattice-height" style="color: #66fcf1; font-size: 1.1rem; font-weight: bold;">0</span>
+                    </div>
+                    <div style="background: #111; padding: 10px; border: 1px solid #333;">
+                        <span style="color: #888; font-size: 0.6rem;">Consensus Epoch:</span><br>
+                        <span id="explorer-current-epoch" style="color: #92cc41; font-size: 1.1rem; font-weight: bold;">Epoch 1</span>
+                    </div>
+                    <div style="background: #111; padding: 10px; border: 1px solid #333;">
+                        <span style="color: #888; font-size: 0.6rem;">Auto-Reclaim Timeout:</span><br>
+                        <span id="explorer-reclaim-timeout" style="color: #f7d51d; font-size: 1.1rem; font-weight: bold;">20 Epochs</span>
+                    </div>
+                    <div style="background: #111; padding: 10px; border: 1px solid #333;">
+                        <span style="color: #888; font-size: 0.6rem;">Consensus Model:</span><br>
+                        <span id="explorer-consensus-model" style="color: #fff; font-size: 0.75rem;">Rotating Paxos over Snowman BFT</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Block-Lattice Claim Inbox -->
+            <div class="nes-container with-title is-dark" id="inbox-container" style="margin-bottom: 20px;">
+                <p class="title">📥 Claim Inbox (Pending Inbound Zero-Gas Transfers)</p>
+                <div style="font-size: 0.7rem;">
+                    <p style="font-size: 0.65rem; color: #ff0;">Incoming transfers awaiting your settlement block on-chain (Precompile <code>0x02</code>):</p>
+                    <div id="inbox-list" style="margin-top: 10px; display: flex; flex-direction: column; gap: 10px;">
+                        <p style="font-size: 0.65rem; color: #aaa;">No pending claims detected.</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Outbound Send & Reclaim Manager -->
+            <div class="nes-container with-title is-dark" id="outbound-reclaim-container" style="margin-bottom: 20px;">
+                <p class="title">🔄 Outbound Sends & Reclaim Manager</p>
+                <div style="font-size: 0.7rem;">
+                    <p style="font-size: 0.65rem; color: #ff0;">Uncollected sends you dispatched. Reclaim funds if the recipient has not settled before the epoch timelock expires:</p>
+                    <div id="reclaim-sends-list" style="margin-top: 10px; display: flex; flex-direction: column; gap: 8px;">
+                        <p style="font-size: 0.65rem; color: #aaa;">No active outbound sends pending reclaim.</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Account-Lattice Transaction History & Block Explorer -->
+            <div class="nes-container with-title is-dark" id="explorer-history-container" style="margin-bottom: 20px;">
+                <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 10px;">
+                    <p class="title" style="margin: 0;">📜 Account-Lattice Transaction Log</p>
+                    <div style="display: flex; gap: 6px;">
+                        <button class="nes-btn is-primary" id="explorer-filter-all" style="padding: 2px 6px; font-size: 0.6rem;">All</button>
+                        <button class="nes-btn" id="explorer-filter-transfers" style="padding: 2px 6px; font-size: 0.6rem;">Transfers</button>
+                        <button class="nes-btn" id="explorer-filter-precompiles" style="padding: 2px 6px; font-size: 0.6rem;">Precompiles</button>
+                        <button class="nes-btn" id="explorer-refresh-btn" style="padding: 2px 6px; font-size: 0.6rem;">🔄 Refresh</button>
+                    </div>
+                </div>
+                <div style="overflow-x: auto;">
+                    <table class="explorer-table" id="explorer-tx-table">
+                        <thead>
+                            <tr>
+                                <th>Type</th>
+                                <th>Block / Tx Hash</th>
+                                <th>Counterparty / Slot</th>
+                                <th>Amount / Detail</th>
+                                <th>Epoch / Time</th>
+                                <th>Status</th>
+                                <th>Action</th>
+                            </tr>
+                        </thead>
+                        <tbody id="explorer-tx-tbody">
+                            <!-- Populated dynamically -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- TAB 4: Sagas NFT Market & Owned Assets -->
+        <div id="tab-market" class="tab-pane">
+            <div class="page-hero-header">
+                <div>
+                    <h2>🖼️ Intent Commerce & Asset Gallery</h2>
+                    <p>Cross-chain multi-token settlement via Sagas (Arbitrum ETH, Base USDC, Gnosis EURe) & Web NFC e-Paper flasher.</p>
+                </div>
+                <div id="market-page-status" class="slot-status-container">
+                    <span class="nes-badge"><span class="is-disabled" id="market-slot-badge">Slot 0x04 Unmounted</span></span>
+                    <span class="slot-root-link" id="market-slot-root-link">Tip: <a href="#explorer" id="market-slot-root-a">0x0 (Unmounted)</a> <span class="slot-update-count" id="market-slot-count">(0 updates)</span></span>
+                </div>
+            </div>
+            <!-- 3. Catalog / Marketplace -->
+            <div class="nes-container with-title is-dark" id="catalog" style="margin-bottom: 20px;">
+                <p class="title">🛒 NFT Intent Marketplace</p>
+                <p style="font-size: 0.75rem;">Observe live rates and buy directly using Arbitrum ETH, Base USDC, or Gnosis EURe sagas.</p>
+                <div class="nft-grid" id="catalog-list" style="margin-top: 20px;">
+                    <!-- Dynamic Catalog Items -->
+                </div>
+            </div>
+
+            <!-- 4. Owned Assets & NFC writer -->
+            <section id="assets" class="nes-container with-title is-dark" style="margin-top: 20px;">
+                <p class="title">🖼️ My Owned Assets & e-Paper Flasher</p>
+                <p style="font-size: 0.75rem;">Manage locally owned NFTs, download e-paper image frames, or flash to epaper displays via Web NFC.</p>
+                <div class="nft-grid" id="owned-list" style="margin-top: 20px;">
+                    <!-- Dynamic Owned Items -->
+                </div>
+            </section>
+        </div>
+
+        <!-- TAB 5: Storage & Advanced Protocols -->
+        <div id="tab-storage" class="tab-pane">
+            <div class="page-hero-header">
+                <div>
+                    <h2>💾 Decentralized Storage & Multi-Dialects</h2>
+                    <p>Iroh BLAKE3 Bao outboards, Space and Time SQL/Document engines, ZK-Merit & Zanzibar ReBAC (0x61).</p>
+                </div>
+                <div id="storage-page-status" class="slot-status-container">
+                    <span class="nes-badge"><span class="is-disabled" id="storage-slot-badge">Slot 0x53 / 0x07 Unmounted</span></span>
+                    <span class="slot-root-link" id="storage-slot-root-link">Tip: <a href="#explorer" id="storage-slot-root-a">0x0 (Unmounted)</a> <span class="slot-update-count" id="storage-slot-count">(0 updates)</span></span>
+                </div>
+            </div>
+            <!-- Independent Storage & File Upload -->
+            <div class="nes-container with-title is-dark" id="storage-upload-container" style="margin-bottom: 20px;">
+                <p class="title">📦 Independent Storage & Iroh Blob Upload</p>
+                <div style="font-size: 0.7rem;">
+                    <p style="font-size: 0.65rem; color: #ff0;">Upload arbitrary data/files to Iroh decentralized storage (Bao Outboard CIDv1):</p>
+                    <div class="nes-field" style="margin-bottom: 5px;">
+                        <label for="standalone-file-input">Select File to Upload:</label>
+                        <input type="file" id="standalone-file-input" class="nes-input is-dark" style="font-size: 0.65rem;">
+                    </div>
+                    <button class="nes-btn is-success" id="standalone-file-upload-btn" style="width: 100%; font-size: 0.65rem; margin-bottom: 8px;">📦 Upload File to Iroh Storage</button>
+                    <div id="standalone-file-result" style="display: none; background: #000; padding: 8px; font-size: 0.6rem; color: #66fcf1; border: 1px solid #444; word-break: break-all;"></div>
+                </div>
+            </div>
+
+            <!-- Space and Time (SxT) Proof of SQL against Target DAO Account -->
+            <div class="nes-container with-title is-dark" id="sxt-dao-query-container" style="margin-bottom: 20px; border: 2px solid #209cee;">
+                <p class="title" style="color: #209cee;">⚡ Space and Time (SxT) Proof of SQL: Targeted DAO Queries</p>
+                <div style="font-size: 0.7rem;">
+                    <p style="font-size: 0.65rem; color: #ff0; line-height: 1.5; margin-bottom: 10px;">
+                        Issue verifiable SQL queries against a target DAO or regional sub-entity chain. Queries verify caller rights via Zanzibar ReBAC (Slot 0x01) and produce cryptographic Proof of SQL commitments over the DAO's anchored SQL state root (Slot 0x07) without revealing full database rows:
+                    </p>
+                    <div style="display: grid; grid-template-columns: 2fr 1fr; gap: 8px; margin-bottom: 10px;">
+                        <div class="nes-field">
+                            <label for="sxt-target-dao-addr">Target DAO / Entity Address:</label>
+                            <input type="text" id="sxt-target-dao-addr" class="nes-input is-dark" placeholder="0x..." style="font-size: 0.65rem;">
+                        </div>
+                        <div style="display: flex; flex-direction: column; justify-content: flex-end;">
+                            <button type="button" class="nes-btn" id="sxt-use-connected-dao-btn" style="font-size: 0.55rem; padding: 4px;">🎯 Use Connected Address</button>
+                        </div>
+                    </div>
+                    <div class="nes-field" style="margin-bottom: 10px;">
+                        <label for="sxt-sql-query-input">SQL Query (Executed via Space & Time Prover):</label>
+                        <input type="text" id="sxt-sql-query-input" class="nes-input is-dark" value="SELECT sub_dao, budget_allocated_tbl FROM regional_allocations WHERE status = 'approved';" style="font-size: 0.65rem; font-family: monospace;">
+                    </div>
+                    <div style="display: flex; gap: 8px; margin-bottom: 10px;">
+                        <button class="nes-btn is-primary" id="exec-sxt-dao-query-btn" style="flex: 2; font-size: 0.65rem;">⚡ Execute Proof of SQL Query (SxT)</button>
+                        <button class="nes-btn is-success" id="claim-storage-merit-btn" style="flex: 1; font-size: 0.65rem;">💰 Claim PoR Merit (0x53)</button>
+                    </div>
+                    <div id="sxt-dao-query-result" style="display: none; background: #000; padding: 8px; font-size: 0.6rem; color: #66fcf1; border: 1px solid #444; word-break: break-all; margin-top: 6px;"></div>
+                </div>
+            </div>
+
+            <!-- Full-Stack DAO App Provenance & State Root Anchoring -->
+            <div class="nes-container with-title is-dark" id="dao-app-provenance" style="margin-bottom: 20px; border: 2px solid #92cc41;">
+                <p class="title" style="color: #92cc41;">🏛️ Full-Stack DAO App Provenance & State Root Anchoring</p>
+                <div style="font-size: 0.7rem;">
+                    <p style="font-size: 0.65rem; color: #ddd; line-height: 1.5; margin-bottom: 10px;">
+                        Stateless account-lattice CAR slot registers verify cryptographic provenance, Space & Time SQL state roots, Iroh media CIDs, and Verkle stems across Paxos epochs without trusted intermediaries.
+                    </p>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px;">
+                        <div class="nes-field">
+                            <label for="dao-app-id">DAO / App Identifier:</label>
+                            <input type="text" id="dao-app-id" class="nes-input is-dark" value="TreasuryDAO" style="font-size: 0.65rem;">
+                        </div>
+                        <div class="nes-field">
+                            <label for="dao-app-version">App Semantic Version:</label>
+                            <input type="text" id="dao-app-version" class="nes-input is-dark" value="v1.0.0" style="font-size: 0.65rem;">
+                        </div>
+                    </div>
+                    <div class="nes-field" style="margin-bottom: 8px;">
+                        <label for="dao-sql-root">SQL Relational State Root (Space & Time / SQLite):</label>
+                        <input type="text" id="dao-sql-root" class="nes-input is-dark" placeholder="0x..." value="0x1111111111111111111111111111111111111111111111111111111111111111" style="font-size: 0.65rem;">
+                    </div>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px;">
+                        <div class="nes-field">
+                            <label for="dao-media-cid">Iroh Media CID:</label>
+                            <input type="text" id="dao-media-cid" class="nes-input is-dark" value="0x0" style="font-size: 0.65rem;">
+                        </div>
+                        <div class="nes-field">
+                            <label for="dao-manifest-cid">App Manifest CID:</label>
+                            <input type="text" id="dao-manifest-cid" class="nes-input is-dark" value="0x0" style="font-size: 0.65rem;">
+                        </div>
+                    </div>
+                    <div style="display: flex; gap: 8px; margin-bottom: 10px;">
+                        <button class="nes-btn is-primary" id="anchor-dao-app-btn" style="flex: 1; font-size: 0.65rem;">⚓ Sign & Anchor State Root</button>
+                        <button class="nes-btn is-success" id="verify-dao-app-btn" style="flex: 1; font-size: 0.65rem;">🔍 Verify Provenance & Verkle</button>
+                        <button class="nes-btn is-warning" id="view-dao-history-btn" style="flex: 1; font-size: 0.65rem;">📜 Slot Provenance History</button>
+                    </div>
+                    <div id="dao-app-anchor-result" style="display: none; background: #000; padding: 8px; font-size: 0.6rem; color: #66fcf1; border: 1px solid #444; word-break: break-all; margin-top: 6px;"></div>
+                    <div id="dao-app-history-display" style="display: none; background: #000; padding: 8px; font-size: 0.6rem; color: #ffcc00; border: 1px solid #ffcc00; margin-top: 6px; max-height: 140px; overflow-y: auto;"></div>
+                </div>
+            </div>
+
+            <!-- Address Interest Signaling Protocol -->
+            <div class="nes-container with-title is-dark" id="signaling" style="margin-bottom: 20px;">
+                <p class="title">📡 Address Interest Signaling</p>
+                <div style="font-size: 0.7rem;">
+                    <p style="font-size: 0.65rem; color: #ff0;">Inscribe blinded interest to SYSTEM_SIGNAL_REGISTRY (0x54):</p>
+                    <div class="nes-field" style="margin-bottom: 10px;">
+                        <label for="sig-target-addr">Target Monitored Address:</label>
+                        <input type="text" id="sig-target-addr" class="nes-input is-dark" placeholder="0x..." style="font-size: 0.65rem;">
+                    </div>
+                    <div class="nes-field" style="margin-bottom: 10px;">
+                        <label for="sig-app-ctx">App Context / Scope:</label>
+                        <input type="text" id="sig-app-ctx" class="nes-input is-dark" value="dao.governance.notifications" style="font-size: 0.65rem;">
+                    </div>
+                    <div style="margin-bottom: 10px;">
+                        <span style="color: #ff0;">Deterministic Topic ID:</span>
+                        <div id="sig-topic-preview" style="background: #000; padding: 6px; font-size: 0.55rem; color: #66fcf1; word-break: break-all;">BLAKE3("bunny.mesh.interest.v1" || Target || Ctx)</div>
+                    </div>
+                    <button class="nes-btn is-warning" id="inscribe-signal-btn" style="width: 100%; font-size: 0.7rem;">📡 Sign & Inscribe Blinded Signal (0x54)</button>
+                </div>
+            </div>
+
+            <!-- Multi-Tiered ZK-Merit & Guarded Bus -->
+            <div class="nes-container with-title is-dark" id="zkmerit" style="margin-bottom: 20px;">
+                <p class="title">🛡️ Multi-Tier ZK-Merit & Guarded Bus</p>
+                <div style="font-size: 0.7rem;">
+                    <p style="font-size: 0.65rem; color: #ff0;">Personalized PageRank & ZK-Reputation Circuit Proofs in RAM:</p>
+                    <div style="margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center;">
+                        <span>Dynamic PageRank:</span>
+                        <span id="dynamic-pagerank-val" style="color: #66fcf1; font-weight: bold;">0.850 (Damping: 0.85)</span>
+                    </div>
+                    <div style="margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center;">
+                        <span>Target Proof Epoch:</span>
+                        <span id="zkmerit-target-epoch-val" style="color: #66fcf1; font-weight: bold;">Epoch 1 (Last Finalized)</span>
+                    </div>
+                    <div class="nes-field" style="margin-bottom: 10px;">
+                        <label for="merit-tier-select">Claimed Governance Tier:</label>
+                        <div class="nes-select is-dark">
+                            <select id="merit-tier-select" style="font-size: 0.65rem;">
+                                <option value="1">Tier 1: Public User (zkOIDC/Passkey)</option>
+                                <option value="2" selected>Tier 2: Contributor (Merit >= 500)</option>
+                                <option value="3">Tier 3: Validator (Staked Bond + TEE)</option>
+                                <option value="4">Tier 4: Treasury Custodian (PQ Multi-Sig)</option>
+                                <option value="5">Tier 5: Core DevOps (TEE + Multi-DAO Seal)</option>
+                            </select>
+                        </div>
+                    </div>
+                    <button class="nes-btn is-warning" id="gen-zkmerit-proof-btn" style="width: 100%; font-size: 0.7rem; margin-bottom: 10px;">🔐 Generate ZK-Merit Proof in WASM</button>
+                    <div id="zkmerit-proof-display" style="background: #000; padding: 6px; font-size: 0.55rem; color: #66fcf1; word-break: break-all; margin-bottom: 10px;">ZK-Merit proof ready.</div>
+                    <div class="nes-field" style="margin-bottom: 10px;">
+                        <label for="guarded-msg-input">Guarded Plane Message:</label>
+                        <input type="text" id="guarded-msg-input" class="nes-input is-dark" value="Emergency shard coordination intent" style="font-size: 0.65rem;">
+                    </div>
+                    <button class="nes-btn is-error" id="submit-guarded-msg-btn" style="width: 100%; font-size: 0.7rem;">🛡️ Submit to Guarded Bus (Noise-Filtered)</button>
+                    <div id="guarded-status-log" style="margin-top: 10px; background: #000; padding: 6px; font-size: 0.6rem; color: #66fcf1;">
+                        Guarded filter active. Unauthenticated noise will be dropped in RAM.
+                    </div>
+                </div>
+            </div>
+
+            <!-- Decentralized Zanzibar ReBAC Manager & 0x61 Precompile Verifier -->
+            <div class="nes-container with-title is-dark" id="zanzibar-container" style="margin-bottom: 20px;">
+                <p class="title">🛡️ Zanzibar ReBAC & Permission Verifier (0x61)</p>
+                <div style="font-size: 0.7rem;">
+                    <p style="font-size: 0.65rem; color: #ff0;">Manage Slot 1 ($R_1$) ReBAC tuples and query permissions:</p>
+                    <div class="nes-field" style="margin-bottom: 10px;">
+                        <label for="zanzibar-ns-select">Low-Entropy Namespace:</label>
+                        <div class="nes-select is-dark">
+                            <select id="zanzibar-ns-select" style="font-size: 0.65rem;">
+                                <option value="1">0x0001: ns:doc (owner, editor, viewer)</option>
+                                <option value="2">0x0002: ns:nexterp (admin, accountant, can_transact)</option>
+                                <option value="3">0x0003: ns:git (maintainer, contributor)</option>
+                                <option value="4">0x0004: ns:contract (passport_valid, can_transact)</option>
+                                <option value="5">0x0005: ns:dao (council, voter, proposer)</option>
+                                <option value="6">0x0006: ns:iot (device_owner, operator)</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="nes-field" style="margin-bottom: 10px;">
+                        <label for="zanzibar-obj-id">Object ID (32-byte Hex):</label>
+                        <input type="text" id="zanzibar-obj-id" class="nes-input is-dark" placeholder="0x5555555555555555555555555555555555555555555555555555555555555555" style="font-size: 0.65rem;">
+                    </div>
+                    <div class="nes-field" style="margin-bottom: 10px;">
+                        <label for="zanzibar-rel-select">Relation / Role:</label>
+                        <div class="nes-select is-dark">
+                            <select id="zanzibar-rel-select" style="font-size: 0.65rem;">
+                                <option value="1">0x0001: owner / admin</option>
+                                <option value="2">0x0002: editor / accountant</option>
+                                <option value="3">0x0003: viewer / reader</option>
+                                <option value="6">0x0006: can_transact / execute</option>
+                                <option value="7">0x0007: maintainer</option>
+                                <option value="8">0x0008: contributor</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="nes-field" style="margin-bottom: 10px;">
+                        <label for="zanzibar-subject-addr">Subject Address:</label>
+                        <input type="text" id="zanzibar-subject-addr" class="nes-input is-dark" placeholder="0x..." style="font-size: 0.65rem;">
+                    </div>
+                    <div style="display: flex; gap: 8px; margin-bottom: 10px;">
+                        <button class="nes-btn is-primary" id="zanzibar-inscribe-btn" style="flex: 1; font-size: 0.65rem;">✍️ Inscribe to Slot 1</button>
+                        <button class="nes-btn is-warning" id="zanzibar-check-btn" style="flex: 1; font-size: 0.65rem;">🔍 Query Permission (0x61)</button>
+                    </div>
+                    <div id="zanzibar-status" style="background: #000; padding: 6px; font-size: 0.6rem; color: #66fcf1; border: 1px solid #444;">
+                        Zanzibar graph ready.
+                    </div>
+                </div>
+            </div>
+
+            <!-- EIP-8141 Multi-Frame & Universal Curve Dispatcher -->
+            <div class="nes-container with-title is-dark" id="frame-tx-container" style="margin-bottom: 20px;">
+                <p class="title">⚡ EIP-8141 Multi-Frame & Curve Dispatcher</p>
+                <div style="font-size: 0.7rem;">
+                    <p style="font-size: 0.65rem; color: #ff0;">Execute multi-frame transactions across any cryptographic curve:</p>
+                    <div class="nes-field" style="margin-bottom: 10px;">
+                        <label for="frame-curve-select">Cryptographic Curve / Key Scheme:</label>
+                        <div class="nes-select is-dark">
+                            <select id="frame-curve-select" style="font-size: 0.65rem;">
+                                <option value="0">Secp256k1 (Ethereum Standard)</option>
+                                <option value="1">Secp256r1 / P-256 (RIP-7212 Passkeys / WebAuthn)</option>
+                                <option value="2">Ed25519 (Solana / Iroh P2P)</option>
+                                <option value="3">ML-DSA-65 (FIPS 204 Post-Quantum Dilithium)</option>
+                                <option value="4">Falcon-512 (Post-Quantum Compact)</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="nes-field" style="margin-bottom: 10px;">
+                        <label for="frame-target-addr">Target Recipient / Contract:</label>
+                        <input type="text" id="frame-target-addr" class="nes-input is-dark" placeholder="0x..." style="font-size: 0.65rem;">
+                    </div>
+                    <div class="nes-field" style="margin-bottom: 10px;">
+                        <label for="frame-target-slot">Target Polymorphic Slot ID:</label>
+                        <input type="number" id="frame-target-slot" class="nes-input is-dark" value="0" style="font-size: 0.65rem;">
+                    </div>
+                    <div class="nes-field" style="margin-bottom: 10px;">
+                        <label for="frame-delegation-addr">EIP-7702 Delegation Code Address (Optional):</label>
+                        <input type="text" id="frame-delegation-addr" class="nes-input is-dark" placeholder="0x... (ERC-7579 Module)" style="font-size: 0.65rem;">
+                    </div>
+                    <div style="margin-bottom: 10px;">
+                        <label>
+                            <input type="checkbox" class="nes-checkbox is-dark" id="frame-paymaster-toggle">
+                            <span>Sponsor via Paymaster Risk Frame (EU/US/Neutral)</span>
+                        </label>
+                    </div>
+                    <button class="nes-btn is-success" id="dispatch-frame-tx-btn" style="width: 100%; font-size: 0.75rem;">🚀 Dispatch Multi-Frame Transaction</button>
+                    <div id="frame-tx-status" style="margin-top: 10px; background: #000; padding: 6px; font-size: 0.6rem; color: #92cc41; max-height: 80px; overflow-y: auto; border: 1px solid #444;">
+                        Frame executor ready.
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- TAB 6: Sovereign Transaction & State-Change Debugger -->
+        <div id="tab-debugger" class="tab-pane">
+            <div class="page-hero-header">
+                <div>
+                    <h2>🐞 Bytecode Debugger & Quantum Dispatcher</h2>
+                    <p>Live calldata analysis, EIP-8141 post-quantum envelope un-wrapping, one-click execution & state wizards.</p>
+                </div>
+                <div id="dbg-page-status" class="slot-status-container">
+                    <span class="nes-badge"><span class="is-disabled" id="dbg-slot-badge">Slot 0x01 / 0x02 Unmounted</span></span>
+                    <span class="slot-root-link" id="dbg-slot-root-link">Tip: <a href="#explorer" id="dbg-slot-root-a">0x0 (Unmounted)</a> <span class="slot-update-count" id="dbg-slot-count">(0 updates)</span></span>
+                </div>
+            </div>
+
+            <section id="debugger" class="nes-container with-title is-dark" style="border: 2px solid #66fcf1;">
+                <p class="title" style="color: #66fcf1;">🐞 Sovereign Transaction & Error Debugger</p>
+                <div style="font-size: 0.7rem;">
+                    <p style="font-size: 0.65rem; color: #ff0; margin-bottom: 10px;">
+                        Dissect any transaction hex, precompile calldata (<code>0x...</code>), JSON-RPC dump, or EVM revert. Automatically isolates Post-Quantum envelopes, parses parameter trees, and diagnoses invariant errors.
+                    </p>
+
+                    <!-- Quick Load Presets -->
+                    <div style="margin-bottom: 10px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center;">
+                        <span style="font-size: 0.6rem; color: #888;">Quick Presets:</span>
+                        <button class="nes-btn is-warning" id="dbg-preset-pq-block" style="padding: 2px 6px; font-size: 0.6rem;">⚡ PQ Blocked Error</button>
+                        <button class="nes-btn is-primary" id="dbg-preset-pq-wrap" style="padding: 2px 6px; font-size: 0.6rem;">📦 Quantum-Wrapped Envelope</button>
+                        <button class="nes-btn is-success" id="dbg-preset-zanzibar" style="padding: 2px 6px; font-size: 0.6rem;">🛡️ Zanzibar 0x61 Check</button>
+                        <button class="nes-btn is-error" id="dbg-preset-verkle" style="padding: 2px 6px; font-size: 0.6rem;">⛓️ Stateless Verkle Revert</button>
+                    </div>
+
+                    <!-- Input Box -->
+                    <div class="nes-field" style="margin-bottom: 12px;">
+                        <label for="dbg-input-textarea" style="font-size: 0.7rem; color: #66fcf1; display: block; margin-bottom: 6px; font-family: 'Press Start 2P', monospace;">Dump Transaction, Calldata, JSON-RPC, or Error:</label>
+                        <textarea id="dbg-input-textarea" class="nes-textarea is-dark" rows="8" placeholder="Paste 0x calldata, raw tx hex, JSON-RPC payload, or revert message..." style="font-size: 0.72rem; font-family: 'Courier New', Courier, monospace; min-height: 220px; line-height: 1.5; padding: 10px; width: 100%; box-sizing: border-box; resize: vertical;"></textarea>
+                    </div>
+
+                    <div style="display: flex; gap: 8px; margin-bottom: 15px; flex-wrap: wrap;">
+                        <button class="nes-btn is-primary" id="dbg-analyze-btn" style="flex: 2; min-width: 180px; font-size: 0.7rem;">🔍 Analyze & Diagnose State-Change</button>
+                        <button class="nes-btn is-warning" id="dbg-share-url-btn" style="flex: 1; min-width: 130px; font-size: 0.7rem;">🔗 Share URL</button>
+                        <button class="nes-btn" id="dbg-clear-btn" style="flex: 0.8; min-width: 90px; font-size: 0.7rem;">🧹 Clear</button>
+                    </div>
+
+                    <!-- Live Bytecode Execution & Quantum Dispatch Panel -->
+                    <div class="nes-container is-dark with-title" style="margin-bottom: 15px; border-color: #ff9900; background: #0f141d;">
+                        <p class="title" style="color: #ff9900; font-size: 0.75rem;">🚀 Live Bytecode Execution & Quantum Dispatch</p>
+                        <p style="font-size: 0.65rem; color: #bbb; margin-bottom: 10px;">
+                            Execute the calldata or raw bytecode directly on the sovereign network. Wrap into a Post-Quantum EIP-8141 envelope, dispatch via connected wallet, or execute bare-metal raw bytes.
+                        </p>
+                        <div style="display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 10px;">
+                            <div style="flex: 2; min-width: 220px;">
+                                <label style="font-size: 0.6rem; color: #66fcf1;">Target Address / Precompile:</label>
+                                <input type="text" id="dbg-exec-target" class="nes-input is-dark" value="0x0000000000000000000000000000000000000003" placeholder="0x..." style="font-size: 0.65rem; font-family: monospace;">
+                            </div>
+                            <div style="flex: 1; min-width: 120px;">
+                                <label style="font-size: 0.6rem; color: #66fcf1;">Value (Native WEI):</label>
+                                <input type="text" id="dbg-exec-value" class="nes-input is-dark" value="0" style="font-size: 0.65rem; font-family: monospace;">
+                            </div>
+                            <div style="flex: 1.5; min-width: 180px;">
+                                <label style="font-size: 0.6rem; color: #66fcf1;">Execution & Proof Mode:</label>
+                                <div class="nes-select is-dark">
+                                    <select id="dbg-exec-mode" style="font-size: 0.65rem;">
+                                        <option value="quantum_wrapped" selected>Mode 2: Quantum Wrapped (ML-DSA-65)</option>
+                                        <option value="raw_bytecode">Mode 4: Bare-Metal Raw Bytecode</option>
+                                        <option value="standard_evm">Mode 3: Standard EVM (Connected Wallet)</option>
+                                        <option value="native_pq">Mode 1: Native PQ Direct</option>
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+                        <div style="display: flex; gap: 10px; flex-wrap: wrap; align-items: center; justify-content: space-between;">
+                            <div style="display: flex; gap: 8px;">
+                                <button type="button" class="nes-btn is-warning" id="dbg-exec-btn" style="font-size: 0.7rem; padding: 4px 14px;">🚀 Execute / Broadcast On-Chain</button>
+                                <button type="button" class="nes-btn is-primary" id="dbg-dryrun-btn" style="font-size: 0.7rem; padding: 4px 12px;">⚡ Dry-Run EVM (eth_call)</button>
+                            </div>
+                            <span id="dbg-exec-status-badge" style="font-size: 0.6rem; color: #aaa;">Ready to dispatch</span>
+                        </div>
+                        <div id="dbg-exec-output-card" style="display: none; margin-top: 10px; padding: 10px; background: #000; border: 1px solid #333; font-family: monospace; font-size: 0.62rem; color: #a8ffb2; word-break: break-all; white-space: pre-wrap;"></div>
+                    </div>
+
+                    <!-- Instant State-Change & Precompile Wizards -->
+                    <div class="nes-container is-dark with-title" style="margin-bottom: 15px; border-color: #66fcf1; background: #0f141d;">
+                        <p class="title" style="color: #66fcf1; font-size: 0.75rem;">⚡ Instant State-Change & Precompile Wizards</p>
+                        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px;">
+                            <!-- Wizard 1: Zanzibar ReBAC Config -->
+                            <div style="background: #141720; border: 1px solid #2a3b4c; padding: 10px; border-radius: 4px;">
+                                <div style="color: #ffcc00; font-weight: bold; font-size: 0.7rem; margin-bottom: 6px;">🔐 Zanzibar ReBAC Inscriber (0x61)</div>
+                                <div style="font-size: 0.6rem; color: #888; margin-bottom: 8px;">Inscribe authorization tuple: <code>object#relation@subject</code></div>
+                                <div style="display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px;">
+                                    <input type="text" id="wiz-zan-object" class="nes-input is-dark" placeholder="Object (e.g. doc:contract_spec)" value="doc:smart_contract_spec" style="font-size: 0.6rem;">
+                                    <input type="text" id="wiz-zan-relation" class="nes-input is-dark" placeholder="Relation (e.g. editor, viewer, admin)" value="editor" style="font-size: 0.6rem;">
+                                    <input type="text" id="wiz-zan-subject" class="nes-input is-dark" placeholder="Subject (address / DID)" value="" style="font-size: 0.6rem;">
+                                </div>
+                                <div style="display: flex; gap: 6px;">
+                                    <button type="button" class="nes-btn is-primary" id="wiz-zan-encode-btn" style="padding: 2px 8px; font-size: 0.6rem; flex: 1;">⚡ Encode</button>
+                                    <button type="button" class="nes-btn is-success" id="wiz-zan-post-btn" style="padding: 2px 8px; font-size: 0.6rem; flex: 1;">🚀 Post to 0x61</button>
+                                </div>
+                            </div>
+
+                            <!-- Wizard 2: W3C Web of Things (WoT) Thing Description -->
+                            <div style="background: #141720; border: 1px solid #2a3b4c; padding: 10px; border-radius: 4px;">
+                                <div style="color: #66fcf1; font-weight: bold; font-size: 0.7rem; margin-bottom: 6px;">🌐 Web of Things (WoT) TD Publisher</div>
+                                <div style="font-size: 0.6rem; color: #888; margin-bottom: 8px;">Generate W3C WoT Thing Description & pin to storage</div>
+                                <div style="display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px;">
+                                    <input type="text" id="wiz-wot-title" class="nes-input is-dark" placeholder="Thing Title (e.g. Sovereign Smart Sensor)" value="Sovereign Smart Enclave Sensor" style="font-size: 0.6rem;">
+                                    <input type="text" id="wiz-wot-props" class="nes-input is-dark" placeholder="Properties (comma separated)" value="temperature, humidity, status" style="font-size: 0.6rem;">
+                                </div>
+                                <div style="display: flex; gap: 6px;">
+                                    <button type="button" class="nes-btn is-primary" id="wiz-wot-gen-btn" style="padding: 2px 8px; font-size: 0.6rem; flex: 1;">⚡ Generate TD</button>
+                                    <button type="button" class="nes-btn is-warning" id="wiz-wot-post-btn" style="padding: 2px 8px; font-size: 0.6rem; flex: 1;">💾 Pin & Publish</button>
+                                </div>
+                            </div>
+
+                            <!-- Wizard 3: Post-Quantum DID Registration -->
+                            <div style="background: #141720; border: 1px solid #2a3b4c; padding: 10px; border-radius: 4px;">
+                                <div style="color: #92cc41; font-weight: bold; font-size: 0.7rem; margin-bottom: 6px;">🆔 DID Registration Calldata (0x03)</div>
+                                <div style="font-size: 0.6rem; color: #888; margin-bottom: 8px;">Encode & broadcast DID document with ML-DSA-65 keys</div>
+                                <p style="font-size: 0.6rem; color: #aaa; margin-bottom: 12px;">Constructs exact Slot 0x03 calldata with multibase post-quantum keys.</p>
+                                <div style="display: flex; gap: 6px;">
+                                    <button type="button" class="nes-btn is-primary" id="wiz-did-encode-btn" style="padding: 2px 8px; font-size: 0.6rem; flex: 1;">⚡ Encode 0x03</button>
+                                    <button type="button" class="nes-btn is-success" id="wiz-did-post-btn" style="padding: 2px 8px; font-size: 0.6rem; flex: 1;">🌐 Broadcast DID</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Toolchain Interop & Remix Bridge -->
+                    <div style="background: #111; border: 1px solid #333; padding: 8px 10px; margin-bottom: 15px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center;">
+                        <span style="font-size: 0.65rem; color: #ffcc00; font-weight: bold;">🛠️ Toolchain Bridge:</span>
+                        <button class="nes-btn is-primary" id="dbg-copy-remix-calldata" style="padding: 2px 6px; font-size: 0.6rem;">📋 Copy Calldata for Remix</button>
+                        <button class="nes-btn is-warning" id="dbg-copy-foundry-cast" style="padding: 2px 6px; font-size: 0.6rem;">📋 Copy Foundry 'cast' Command</button>
+                        <button class="nes-btn is-success" id="dbg-open-remix" style="padding: 2px 6px; font-size: 0.6rem;">🌐 Open in Remix IDE</button>
+                    </div>
+
+                    <!-- Diagnosis Alert Card (Hidden until analysis) -->
+                    <div id="dbg-diagnostic-card" style="display: none; padding: 12px; margin-bottom: 15px; border-radius: 4px; border: 2px solid #444; background: #1a1a1a;">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                            <span id="dbg-card-category" style="font-weight: bold; font-size: 0.75rem; text-transform: uppercase; color: #ffcc00;">Diagnostic Category</span>
+                            <span id="dbg-card-severity-badge" style="background: #e74c3c; color: #fff; padding: 2px 6px; font-size: 0.6rem; border-radius: 3px;">ERROR</span>
+                        </div>
+                        <h4 id="dbg-card-title" style="margin: 0 0 8px 0; font-size: 0.8rem; color: #fff;">Error Title</h4>
+                        <p id="dbg-card-root-cause" style="margin: 0 0 8px 0; font-size: 0.65rem; color: #ddd; line-height: 1.4;">Root cause explanation...</p>
+                        <div id="dbg-card-tech-details" style="background: rgba(0,0,0,0.6); padding: 6px; font-family: monospace; font-size: 0.6rem; color: #ffcc00; margin-bottom: 10px; word-break: break-all;"></div>
+                        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
+                            <span id="dbg-card-remediation" style="font-size: 0.65rem; color: #55ff55;">Suggested remediation...</span>
+                            <button class="nes-btn is-warning" id="dbg-card-action-btn" style="display: none; padding: 2px 8px; font-size: 0.6rem;">Take Action</button>
+                        </div>
+                    </div>
+
+                    <!-- Post-Quantum Envelope Dissection Card -->
+                    <div id="dbg-pq-card" style="display: none; padding: 14px; margin-bottom: 15px; border-radius: 0 !important; border: 3px solid #209cee; background: #0c1824;">
+                        <h4 style="margin: 0 0 10px 0; font-size: 0.8rem; color: #209cee; font-family: 'Press Start 2P', monospace;">📦 Post-Quantum Envelope (EIP-8141) Dissected</h4>
+                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; font-size: 0.65rem; font-family: monospace;">
+                            <div style="background: rgba(0,0,0,0.5); padding: 10px; border: 2px solid #333;">
+                                <div style="color: #ffcc00; font-weight: bold; margin-bottom: 6px;">Outer Secp256k1 Frame:</div>
+                                <div id="dbg-pq-outer" style="color: #66fcf1; word-break: break-all; margin-bottom: 6px;">-</div>
+                                <div>r: <span id="dbg-pq-r" style="color: #fff;">-</span></div>
+                                <div>s: <span id="dbg-pq-s" style="color: #fff;">-</span></div>
+                                <div>v: <span id="dbg-pq-v" style="color: #fff;">-</span></div>
+                            </div>
+                            <div style="background: rgba(0,0,0,0.5); padding: 10px; border: 2px solid #333;">
+                                <div style="color: #66fcf1; font-weight: bold; margin-bottom: 6px;">Inner Post-Quantum Proof:</div>
+                                <div id="dbg-pq-sig" style="color: #55ff55; word-break: break-all; margin-bottom: 6px;">-</div>
+                                <div>Scheme: <span id="dbg-pq-scheme" style="color: #fff;">ML-DSA-65</span></div>
+                                <div>Sig Len: <span id="dbg-pq-siglen" style="color: #fff;">3309 bytes</span></div>
+                                <div>Target: <span id="dbg-pq-target" style="color: #fff;">-</span></div>
+                                <div style="margin-top: 4px;">Calldata: <span id="dbg-pq-calldata" style="color: #fff; word-break: break-all;">-</span></div>
+                            </div>
+                        </div>
+                        <div id="dbg-pq-status" style="margin-top: 8px; font-size: 0.65rem; font-family: monospace;"></div>
+                        <div style="margin-top: 10px; display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap;">
+                            <button type="button" class="nes-btn is-primary" id="dbg-pq-reverify-btn" style="padding: 3px 10px; font-size: 0.65rem;">🛡️ Re-Verify Signature in RAM</button>
+                            <button type="button" class="nes-btn is-success" id="dbg-pq-resign-btn" style="padding: 3px 10px; font-size: 0.65rem;">✍️ Re-Sign with Active ML-DSA</button>
+                        </div>
+                    </div>
+
+                    <!-- Decoded Calldata & Precompile Arguments -->
+                    <div id="dbg-calldata-card" style="display: none; padding: 12px; margin-bottom: 15px; border-radius: 4px; border: 2px solid #555; background: #141414;">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                            <span style="color: #ff0; font-weight: bold;">⚙️ Decoded Calldata & Parameters</span>
+                            <span id="dbg-mode-badge" style="color: #66fcf1; font-weight: bold;">Legacy Wrapped</span>
+                        </div>
+                        <div style="font-size: 0.65rem; font-family: monospace; line-height: 1.6;">
+                            <div><span style="color: #888;">Target Precompile:</span> <span id="dbg-target-desc" style="color: #fff;">0x03 DID_REGISTRY</span></div>
+                            <div><span style="color: #888;">Function Signature:</span> <span id="dbg-function-sig" style="color: #66fcf1; font-weight: bold;">registerDid(...)</span></div>
+                            <div><span style="color: #888;">Selector:</span> <span id="dbg-selector" style="color: #ff9900;">0xbfe671c0</span></div>
+                            <div style="margin-top: 6px; color: #888;">Decoded Parameters:</div>
+                            <pre id="dbg-params-json" style="background: #000; padding: 8px; border: 1px solid #333; color: #a8ffb2; font-size: 0.6rem; overflow-x: auto; margin-top: 4px;"></pre>
+                        </div>
+                    </div>
+
+                    <!-- EVM Bytecode & Opcode Disassembly Card (Remix-Style) -->
+                    <div id="dbg-opcode-card" style="display: none; padding: 12px; margin-bottom: 15px; border-radius: 4px; border: 2px solid #209cee; background: #0c1824;">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; flex-wrap: wrap; gap: 6px;">
+                            <span style="color: #209cee; font-weight: bold; font-family: 'Press Start 2P', monospace; font-size: 0.65rem;">🔬 EVM Opcode Disassembly</span>
+                            <button type="button" class="nes-btn" id="dbg-copy-opcodes-btn" style="padding: 2px 6px; font-size: 0.55rem;">📋 Copy Opcodes</button>
+                        </div>
+                        <p style="font-size: 0.6rem; color: #aaa; margin-bottom: 8px;">Disassembled bytecode instructions with program counters (PC), opcode mnemonics, and push operands:</p>
+                        <pre id="dbg-opcode-trace" style="background: #000; padding: 10px; border: 1px solid #333; color: #66fcf1; max-height: 220px; overflow-y: auto; overflow-x: auto; font-size: 0.65rem; font-family: 'Courier New', Courier, monospace; line-height: 1.5; white-space: pre; margin: 0;"></pre>
+                    </div>
+
+                    <!-- Custom Contract & Namespace Uploader (Account-Scoped) -->
+                    <div class="nes-container is-dark with-title" style="margin-top: 15px; border: 1px dashed #666;">
+                        <p class="title" style="font-size: 0.65rem; color: #ffcc00;">📁 Upload Custom Contract ABI / Namespace (Scoped to Account)</p>
+                        <p style="font-size: 0.6rem; color: #aaa; margin-bottom: 8px;">
+                            Supplied ABIs are saved under <code>accounts/&lt;current_address&gt;/contracts/</code> and dynamically used by the debugger to decode custom precompiles or deployed smart contracts.
+                        </p>
+                        <div style="display: flex; gap: 8px; margin-bottom: 8px;">
+                            <div style="flex: 1;">
+                                <label style="font-size: 0.6rem;">Contract Name / Label:</label>
+                                <input type="text" id="dbg-custom-name" class="nes-input is-dark" placeholder="e.g. MyCustomPrecompile" style="font-size: 0.65rem;">
+                            </div>
+                            <div style="flex: 1;">
+                                <label style="font-size: 0.6rem;">Target Address (0x...):</label>
+                                <input type="text" id="dbg-custom-addr" class="nes-input is-dark" placeholder="0x..." style="font-size: 0.65rem;">
+                            </div>
+                        </div>
+                        <div class="nes-field" style="margin-bottom: 8px;">
+                            <label style="font-size: 0.6rem;">JSON ABI Definition:</label>
+                            <textarea id="dbg-custom-abi-json" class="nes-textarea is-dark" rows="3" placeholder='[{"name":"myFunction","inputs":[],"type":"function"}]' style="font-size: 0.6rem; font-family: monospace;"></textarea>
+                        </div>
+                        <div style="display: flex; justify-content: space-between; align-items: center;">
+                            <span id="dbg-custom-upload-status" style="font-size: 0.6rem; color: #66fcf1;">Ready</span>
+                            <button class="nes-btn is-success" id="dbg-save-custom-btn" style="padding: 2px 10px; font-size: 0.65rem;">💾 Save to Account Contracts</button>
+                        </div>
+                    </div>
+
+                </div>
+            </section>
+        </div>
     </div>
 
     <!-- modal checkout -->

@@ -37,7 +37,8 @@ body {
 }
 
 .container {
-    max-width: 1200px;
+    max-width: 1400px;
+    width: 96%;
     margin: 0 auto;
     padding: 20px;
 }
@@ -241,4 +242,405 @@ header h1 {
     display: flex;
     justify-content: space-between;
     margin-top: 30px;
+}
+
+/* Tabbed View Navigation - Authentic 8-Bit NES Retro System */
+.main-nav-container {
+    background: #000;
+    border: 4px solid #fff;
+    border-bottom: 4px solid #fff;
+    border-radius: 0 !important;
+    padding: 8px 10px 0 10px;
+    margin-bottom: 0;
+    box-shadow: 0 4px #000;
+}
+
+.main-nav-tabs {
+    display: flex;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    gap: 4px;
+    align-items: flex-end;
+    margin: 0;
+    padding: 0 0 2px 0;
+    scrollbar-width: thin;
+}
+
+.tab-btn {
+    cursor: pointer;
+    font-family: 'Press Start 2P', monospace !important;
+    font-size: 0.62rem !important;
+    line-height: 1.2 !important;
+    text-transform: uppercase;
+    letter-spacing: 0;
+    padding: 7px 10px !important;
+    border-radius: 0 !important;
+    border: 3px solid #555 !important;
+    border-bottom: none !important;
+    background: #212529 !important;
+    color: #999 !important;
+    position: relative;
+    user-select: none;
+    box-shadow: none !important;
+    image-rendering: pixelated;
+    transition: none; /* Authentic instant 8-bit response */
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+.tab-btn:hover {
+    background: #333 !important;
+    color: #fff !important;
+    border-color: #aaa !important;
+    transform: none !important;
+}
+
+.tab-btn.active {
+    background: #209cee !important;
+    color: #fff !important;
+    border: 3px solid #fff !important;
+    border-bottom: 4px solid #209cee !important;
+    transform: translateY(-2px) !important;
+    z-index: 10;
+}
+
+.tab-btn.active::before {
+    content: "▶";
+    font-size: 0.6rem;
+    color: #f7d51d;
+    margin-right: 6px;
+    display: inline-block;
+    animation: nesStepBlink 0.8s steps(1, start) infinite;
+}
+
+@keyframes nesStepBlink {
+    0%, 49% { opacity: 1; }
+    50%, 100% { opacity: 0; }
+}
+
+.tab-pane {
+    display: none;
+    background: #212529;
+    border: 4px solid #fff;
+    border-top: none;
+    border-radius: 0 !important;
+    padding: 22px 18px;
+    box-shadow: 0 4px #000;
+}
+
+.tab-pane.active {
+    display: block;
+}
+
+/* Page Hero Header in each tab */
+.page-hero-header {
+    background: #111;
+    border: 3px solid #444;
+    border-left: 6px solid #66fcf1;
+    padding: 14px 18px;
+    margin-bottom: 20px;
+    border-radius: 0 !important;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 12px;
+}
+
+.page-hero-header h2 {
+    margin: 0;
+    font-size: 0.95rem;
+    color: #66fcf1;
+    letter-spacing: 0.5px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-family: 'Press Start 2P', monospace;
+}
+
+.page-hero-header p {
+    margin: 6px 0 0 0;
+    font-size: 0.65rem;
+    color: #a0aec0;
+    line-height: 1.4;
+}
+
+/* Universal NES Badge & Tag Fix - Prevents single/multi-span polygon distortion & truncation */
+.nes-badge {
+    display: inline-flex !important;
+    position: relative !important;
+    vertical-align: middle !important;
+    font-family: 'Press Start 2P', monospace !important;
+    line-height: 1 !important;
+    white-space: nowrap !important;
+    margin: 2px 4px !important;
+    width: auto !important;
+    min-width: 0 !important;
+    max-width: none !important;
+    height: auto !important;
+    border-radius: 0 !important;
+    filter: none !important;
+    clip-path: none !important;
+    overflow: visible !important;
+}
+
+.nes-badge > span,
+.nes-badge span:first-child,
+.nes-badge span:last-child {
+    display: inline-block !important;
+    position: static !important;
+    font-family: 'Press Start 2P', monospace !important;
+    font-size: 0.6rem !important;
+    padding: 4px 8px !important;
+    line-height: 1.3 !important;
+    letter-spacing: 0 !important;
+    border-radius: 0 !important;
+    box-sizing: border-box !important;
+    border: none !important;
+    width: auto !important;
+    min-width: 0 !important;
+    max-width: none !important;
+    height: auto !important;
+    clip-path: none !important;
+    overflow: visible !important;
+}
+
+/* Single-child badge: crisp 2px retro pixel border without jagged artifacts */
+.nes-badge > span:only-child {
+    box-shadow: 0 -2px #000, 0 2px #000, -2px 0 #000, 2px 0 #000 !important;
+    margin: 2px !important;
+}
+
+/* Multi-child split badge: left and right parts cleanly joined */
+.nes-badge > span:first-child:not(:only-child) {
+    box-shadow: 0 -2px #000, 0 2px #000, -2px 0 #000 !important;
+    margin: 2px 0 2px 2px !important;
+}
+
+.nes-badge > span:last-child:not(:only-child) {
+    box-shadow: 0 -2px #000, 0 2px #000, 2px 0 #000 !important;
+    margin: 2px 2px 2px 0 !important;
+}
+
+.nes-badge span.is-success {
+    background-color: #92cc41 !important;
+    color: #212529 !important;
+}
+.nes-badge span.is-primary {
+    background-color: #209cee !important;
+    color: #fff !important;
+}
+.nes-badge span.is-warning {
+    background-color: #f7d51d !important;
+    color: #212529 !important;
+}
+.nes-badge span.is-error {
+    background-color: #e76e55 !important;
+    color: #fff !important;
+}
+.nes-badge span.is-dark {
+    background-color: #212529 !important;
+    color: #fff !important;
+}
+
+/* Non-blocking 8-bit Auto-fading Retro Toast Notification */
+#nes-toast-container {
+    position: fixed;
+    top: 24px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 99999;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    pointer-events: none;
+}
+
+.nes-toast {
+    pointer-events: auto;
+    font-family: 'Press Start 2P', monospace;
+    font-size: 0.65rem;
+    line-height: 1.4;
+    padding: 12px 18px;
+    background: #111;
+    color: #fff;
+    border: 4px solid #fff;
+    box-shadow: 0 6px #000;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    max-width: 90vw;
+    animation: toastFadeIn 0.2s ease forwards;
+    transition: opacity 0.4s ease, transform 0.4s ease;
+}
+
+.nes-toast.is-success {
+    border-color: #92cc41;
+    color: #92cc41;
+}
+
+.nes-toast.is-error {
+    border-color: #e76e55;
+    color: #e76e55;
+}
+
+.nes-toast.is-warning {
+    border-color: #f7d51d;
+    color: #f7d51d;
+}
+
+.nes-toast.is-info {
+    border-color: #209cee;
+    color: #66fcf1;
+}
+
+.nes-toast.toast-fade-out {
+    opacity: 0;
+    transform: translateY(-12px);
+}
+
+@keyframes toastFadeIn {
+    from { opacity: 0; transform: translateY(-14px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+/* Explorer Table Interactive Styles */
+.explorer-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.65rem;
+    margin-top: 10px;
+}
+.explorer-table th, .explorer-table td {
+    padding: 8px 10px;
+    text-align: left;
+    border-bottom: 1px solid #333;
+}
+.explorer-table th {
+    background: #111;
+    color: #ff0;
+    font-weight: bold;
+}
+.explorer-table tbody tr {
+    cursor: pointer;
+    transition: background 0.1s;
+}
+.explorer-table tbody tr:hover {
+    background: rgba(32, 156, 238, 0.2) !important;
+}
+
+/* Retro Sleek Dark Scrollbars (Eliminates wide white OS scrollbars) */
+::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+::-webkit-scrollbar-track {
+    background: #0d1117;
+}
+::-webkit-scrollbar-thumb {
+    background: #30363d;
+    border: 1px solid #484f58;
+}
+::-webkit-scrollbar-thumb:hover {
+    background: #209cee;
+}
+
+.modal-body-scroll {
+    scrollbar-width: thin;
+    scrollbar-color: #30363d #0d1117;
+}
+
+/* Developer Mode Warning Callout in Settings */
+.dev-mode-warning-box {
+    margin-top: 8px;
+    padding: 8px 10px;
+    background: #2a1b00;
+    border: 1px dashed #ffcc00;
+    color: #ffdd66;
+    font-size: 0.62rem;
+    line-height: 1.5;
+    font-family: monospace;
+}
+
+/* Unified Slot Status Header in Tab Heroes */
+.slot-status-container {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 4px;
+}
+
+.slot-root-link {
+    font-family: monospace;
+    font-size: 0.62rem;
+    color: #aaa;
+}
+
+.slot-root-link a {
+    color: #66fcf1;
+    text-decoration: underline;
+}
+
+.slot-root-link a:hover {
+    color: #f7d51d;
+}
+
+.slot-update-count {
+    color: #f7d51d;
+    font-size: 0.58rem;
+}
+
+/* Structured Payload & In-Wallet Prompt Inspector */
+.structured-payload-container {
+    margin-top: 6px;
+}
+
+.payload-view-toggle {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 6px;
+}
+
+.payload-view-toggle button {
+    font-size: 0.55rem !important;
+    padding: 2px 6px !important;
+}
+
+.structured-table {
+    width: 100%;
+    border-collapse: collapse;
+    background: #080808;
+    border: 1px solid #333;
+    font-size: 0.62rem;
+    font-family: monospace;
+    margin-top: 4px;
+}
+
+.structured-table th {
+    background: #181818;
+    color: #66fcf1;
+    padding: 4px 6px;
+    text-align: left;
+    border-bottom: 1px solid #333;
+}
+
+.structured-table td {
+    padding: 4px 6px;
+    border-bottom: 1px solid #222;
+    color: #eee;
+    word-break: break-all;
+}
+
+.structured-table tr:hover {
+    background: rgba(102, 252, 241, 0.05);
+}
+
+.envelope-badge-layer {
+    display: inline-block;
+    padding: 2px 5px;
+    font-size: 0.55rem;
+    border: 1px solid #ffcc00;
+    color: #ffcc00;
+    margin-bottom: 4px;
+    background: rgba(255, 204, 0, 0.1);
 }
