@@ -8,9 +8,53 @@ base_dir = os.path.dirname(os.path.abspath(__file__))
 www_dir = os.path.join(base_dir, 'www')
 pkg_dir = os.path.join(www_dir, 'pkg')
 
+# Load local ethers UMD bundle (no CDN)
+ethers_content = ""
+ethers_path = os.path.join(base_dir, 'node_modules', 'ethers', 'dist', 'ethers.umd.min.js')
+if os.path.exists(ethers_path):
+    with open(ethers_path, 'r') as f:
+        ethers_content = f.read()
+
+# Load local nes.css (no CDN)
+nes_css_content = ""
+nes_css_path = os.path.join(base_dir, 'node_modules', 'nes.css', 'css', 'nes.min.css')
+if os.path.exists(nes_css_path):
+    with open(nes_css_path, 'r') as f:
+        nes_css_content = f.read()
+
+# Load local Press Start 2P font woff2 as inline base64 (no Google Fonts CDN)
+font_face_css = ""
+font_path = os.path.join(base_dir, 'node_modules', '@fontsource', 'press-start-2p', 'files', 'press-start-2p-latin-400-normal.woff2')
+if os.path.exists(font_path):
+    with open(font_path, 'rb') as f:
+        font_b64 = base64.b64encode(f.read()).decode('utf-8')
+        font_face_css = f"""@font-face {{
+    font-family: 'Press Start 2P';
+    font-style: normal;
+    font-display: swap;
+    font-weight: 400;
+    src: url('data:font/woff2;base64,{font_b64}') format('woff2');
+}}
+"""
+
 # Load styles
 with open(os.path.join(www_dir, 'style.css'), 'r') as f:
-    style_content = f.read()
+    app_style_content = f.read()
+
+style_content = font_face_css + "\n" + nes_css_content + "\n" + app_style_content
+
+# Load contracts and sovereign SDK js
+contracts_content = ""
+contracts_path = os.path.join(www_dir, 'contracts.js')
+if os.path.exists(contracts_path):
+    with open(contracts_path, 'r') as f:
+        contracts_content = f.read()
+
+client_content = ""
+client_path = os.path.join(www_dir, 'sovereign_client.js')
+if os.path.exists(client_path):
+    with open(client_path, 'r') as f:
+        client_content = f.read()
 
 # Load app js
 with open(os.path.join(www_dir, 'app.js'), 'r') as f:
@@ -39,7 +83,7 @@ else:
     # Fallback if wasm-pack format is slightly different
     js_bindings = js_bindings.replace("init(input)", "init(wasmBytes)")
 
-full_js = wasm_init_override + "\n" + js_bindings + "\n" + app_content
+full_js = ethers_content + "\n" + wasm_init_override + "\n" + js_bindings + "\n" + contracts_content + "\n" + client_content + "\n" + app_content
 
 # Read template
 with open(os.path.join(www_dir, 'template.html'), 'r') as f:

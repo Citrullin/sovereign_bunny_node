@@ -1,0 +1,36 @@
+{
+  "name": "@sovereign/wallet-sdk",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Sovereign Account-Lattice Client SDK & Web Application",
+  "main": "dist/src/index.js",
+  "types": "dist/src/index.d.ts",
+  "scripts": {
+    "build:ts": "tsc -p tsconfig.json",
+    "build:app": "python3 build.py",
+    "build": "npm run build:ts && npm run build:app",
+    "test:unit": "node dist/tests/unit/contracts.test.js && node dist/tests/unit/combinations.test.js && node dist/tests/unit/security_policy.test.js && node dist/tests/unit/debugger.test.js && node dist/tests/unit/fediverse_and_ticker.test.js",
+    "test:e2e": "node dist/tests/e2e/sdk_integration.test.js",
+    "test": "npm run test:unit"
+  },
+  "keywords": [
+    "sovereign",
+    "lattice",
+    "post-quantum",
+    "ml-dsa",
+    "ethers",
+    "precompiles",
+    "zkp"
+  ],
+  "author": "Sovereign Reth Team",
+  "license": "MIT",
+  "dependencies": {
+    "@fontsource/press-start-2p": "^5.3.0",
+    "ethers": "^6.7.0",
+    "nes.css": "^2.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  }
+}

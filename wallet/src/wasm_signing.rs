@@ -36,6 +36,25 @@ impl scale::Encode for LatticePayload {
     }
 }
 
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default)]
+pub struct StaticWitnessProof {
+    pub target_account: Address,
+    pub state_root: B256,
+    pub proof_data: Vec<u8>,
+    pub quadrant_matrix: [u64; 4],
+    pub compliance_proof: Vec<u8>,
+}
+
+impl scale::Encode for StaticWitnessProof {
+    fn encode_to<T: scale::Output + ?Sized>(&self, dest: &mut T) {
+        self.target_account.0.encode_to(dest);
+        self.state_root.0.encode_to(dest);
+        self.proof_data.encode_to(dest);
+        self.quadrant_matrix.encode_to(dest);
+        self.compliance_proof.encode_to(dest);
+    }
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct LatticeBlock {
     pub account: Address,
@@ -43,7 +62,7 @@ pub struct LatticeBlock {
     pub sequence: u64,
     pub payload: LatticePayload,
     pub signature: Vec<u8>,
-    pub static_witnesses: Vec<Vec<u8>>,
+    pub static_witnesses: Vec<StaticWitnessProof>,
 }
 
 impl scale::Encode for LatticeBlock {
@@ -142,13 +161,21 @@ pub fn sign_block_lattice_send(
     let sig_bytes = alloy_primitives::hex::decode(secp_sig_hex.trim_start_matches("0x"))
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
+    let witness = StaticWitnessProof {
+        target_account: address,
+        state_root: B256::ZERO,
+        proof_data: pq_sig,
+        quadrant_matrix: [0; 4],
+        compliance_proof: Vec::new(),
+    };
+
     let block = LatticeBlock {
         account: address,
         previous_hash: prev_hash,
         sequence,
         payload,
         signature: sig_bytes,
-        static_witnesses: vec![pq_sig],
+        static_witnesses: vec![witness],
     };
 
     let serialized = serde_json::to_string(&block)
@@ -186,13 +213,21 @@ pub fn sign_block_lattice_receive(
     let sig_bytes = alloy_primitives::hex::decode(secp_sig_hex.trim_start_matches("0x"))
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
+    let witness = StaticWitnessProof {
+        target_account: address,
+        state_root: B256::ZERO,
+        proof_data: pq_sig,
+        quadrant_matrix: [0; 4],
+        compliance_proof: Vec::new(),
+    };
+
     let block = LatticeBlock {
         account: address,
         previous_hash: prev_hash,
         sequence,
         payload,
         signature: sig_bytes,
-        static_witnesses: vec![pq_sig],
+        static_witnesses: vec![witness],
     };
 
     let serialized = serde_json::to_string(&block)
@@ -230,16 +265,82 @@ pub fn sign_block_lattice_receive_hex(
     let sig_bytes = alloy_primitives::hex::decode(secp_sig_hex.trim_start_matches("0x"))
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
+    let witness = StaticWitnessProof {
+        target_account: address,
+        state_root: B256::ZERO,
+        proof_data: pq_sig,
+        quadrant_matrix: [0; 4],
+        compliance_proof: Vec::new(),
+    };
+
     let block = LatticeBlock {
         account: address,
         previous_hash: prev_hash,
         sequence,
         payload,
         signature: sig_bytes,
-        static_witnesses: vec![pq_sig],
+        static_witnesses: vec![witness],
     };
 
     let serialized = scale::Encode::encode(&block);
     Ok(format!("0x{}", alloy_primitives::hex::encode(serialized)))
+}
+
+#[wasm_bindgen]
+pub fn sign_activitypub_post(
+    seed: &[u8],
+    actor_uri: &str,
+    content: &str,
+    in_reply_to: &str,
+    media_cid: &str,
+) -> Result<String, JsValue> {
+    let activity_id = format!("{}/posts/{}", actor_uri, alloy_primitives::hex::encode(alloy_primitives::keccak256(content.as_bytes())));
+    let payload_to_sign = format!("{}:{}:{}", actor_uri, content, media_cid);
+    let payload_hash = alloy_primitives::keccak256(payload_to_sign.as_bytes());
+
+    let pq_sig = sign_with_mldsa(seed, payload_hash.as_slice())?;
+    let pq_sig_hex = format!("0x{}", alloy_primitives::hex::encode(pq_sig));
+
+    let activity = serde_json::json!({
+        "@context": ["https://www.w3.org/ns/activitystreams", "https://w3id.org/security/v1"],
+        "id": activity_id,
+        "type": "Create",
+        "actor": actor_uri,
+        "published": "2026-08-31T12:00:00Z",
+        "to": ["https://www.w3.org/ns/activitystreams#Public"],
+        "object": {
+            "id": format!("{}/notes/{}", actor_uri, alloy_primitives::hex::encode(alloy_primitives::keccak256(content.as_bytes()))),
+            "type": "Note",
+            "attributedTo": actor_uri,
+            "content": content,
+            "inReplyTo": if in_reply_to.is_empty() { serde_json::Value::Null } else { serde_json::json!(in_reply_to) },
+            "attachment": if media_cid.is_empty() { serde_json::Value::Null } else {
+                serde_json::json!([{
+                    "type": "Document",
+                    "mediaType": "application/vnd.iroh.bao-slice",
+                    "url": format!("iroh://{}", media_cid)
+                }])
+            }
+        },
+        "signature": {
+            "type": "MlDsa65VerificationKey2024",
+            "creator": format!("{}#ml-dsa", actor_uri),
+            "signatureValue": pq_sig_hex
+        }
+    });
+
+    serde_json::to_string(&activity).map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+#[wasm_bindgen]
+pub fn sign_topic_interest(
+    seed: &[u8],
+    account_hex: &str,
+    topic_u8: u8,
+) -> Result<String, JsValue> {
+    let payload = format!("topic_interest:{}:{}", account_hex, topic_u8);
+    let payload_hash = alloy_primitives::keccak256(payload.as_bytes());
+    let pq_sig = sign_with_mldsa(seed, payload_hash.as_slice())?;
+    Ok(format!("0x{}", alloy_primitives::hex::encode(pq_sig)))
 }
 
