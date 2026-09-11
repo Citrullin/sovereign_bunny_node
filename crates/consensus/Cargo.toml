@@ -30,6 +30,7 @@ boringtun = { workspace = true }
 scale = { workspace = true }
 k256 = { workspace = true }
 ed25519-dalek = { workspace = true }
+sovereign-ssz = { path = "../sovereign-ssz" }
 sovereign-attestation = { path = "../attestation" }
 sovereign-identity = { path = "../identity" }
 sovereign-crypto = { path = "../crypto" }
@@ -39,6 +40,7 @@ fips204 = { workspace = true }
 
 c-kzg = "2.1.8"
 reqwest = { version = "0.12", features = ["json"] }
+blake3 = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rand = "0.8"

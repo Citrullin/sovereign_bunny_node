@@ -1,4 +1,130 @@
+use alloy_primitives::Address;
 use serde::{Deserialize, Serialize};
+
+fn default_ticker() -> String {
+    "TBL".to_string()
+}
+
+/// Dynamic network configuration defining genesis accounts, schemas, and elastic sharding.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkGenesisConfig {
+    pub network_name: String,
+    pub chain_id: u64,
+    /// Native currency ticker symbol (default: "TBL")
+    #[serde(default = "default_ticker")]
+    pub ticker: String,
+    /// Registered system function accounts (e.g., precompiles)
+    pub system_accounts: Vec<SystemAccountConfig>,
+    /// Global slot schema definitions
+    pub slot_schemas: Vec<SlotSchemaConfig>,
+    /// Genesis sharding parameters
+    #[serde(default)]
+    pub shard_genesis: ShardGenesisConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShardGenesisConfig {
+    pub initial_shards: u32,
+    pub min_shards: u32,
+    pub max_shards: u32,
+    pub elasticity_scale_up_tps: u64,
+    pub elasticity_scale_down_idle_epochs: u64,
+}
+
+impl Default for ShardGenesisConfig {
+    fn default() -> Self {
+        Self {
+            initial_shards: 16,
+            min_shards: 16,
+            max_shards: 4096,
+            elasticity_scale_up_tps: 5000,
+            elasticity_scale_down_idle_epochs: 5,
+        }
+    }
+}
+
+impl Default for NetworkGenesisConfig {
+    fn default() -> Self {
+        Self {
+            network_name: "sovereign-local".to_string(),
+            chain_id: 65001,
+            ticker: "TBL".to_string(),
+            system_accounts: vec![
+                SystemAccountConfig {
+                    address: Address::repeat_byte(0x01),
+                    name: "core.precompile.router".to_string(),
+                    kind: "Precompile".to_string(),
+                },
+                SystemAccountConfig {
+                    address: Address::repeat_byte(0x02),
+                    name: "zkdns.canonical.registry".to_string(),
+                    kind: "NamespaceRegistry".to_string(),
+                },
+            ],
+            slot_schemas: vec![
+                SlotSchemaConfig {
+                    slot_id: 0,
+                    name: "DID Document Root".to_string(),
+                    plugin_name: "core.did_identity".to_string(),
+                    version: 1,
+                    activation_epoch: 0,
+                },
+                SlotSchemaConfig {
+                    slot_id: 1,
+                    name: "Zanzibar ReBAC SMT".to_string(),
+                    plugin_name: "core.zanzibar".to_string(),
+                    version: 1,
+                    activation_epoch: 0,
+                },
+                SlotSchemaConfig {
+                    slot_id: 2,
+                    name: "Native Payment Core".to_string(),
+                    plugin_name: "core.native_payment".to_string(),
+                    version: 1,
+                    activation_epoch: 0,
+                },
+                SlotSchemaConfig {
+                    slot_id: 3,
+                    name: "Git VCS Object DAG".to_string(),
+                    plugin_name: "vcs.git_dag".to_string(),
+                    version: 1,
+                    activation_epoch: 0,
+                },
+                SlotSchemaConfig {
+                    slot_id: 4,
+                    name: "Relational SQL Digest".to_string(),
+                    plugin_name: "ext.sqldigest".to_string(),
+                    version: 1,
+                    activation_epoch: 0,
+                },
+                SlotSchemaConfig {
+                    slot_id: 7,
+                    name: "Reputation & Merit Score".to_string(),
+                    plugin_name: "reputation.merit".to_string(),
+                    version: 1,
+                    activation_epoch: 0,
+                },
+            ],
+            shard_genesis: ShardGenesisConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemAccountConfig {
+    pub address: Address,
+    pub name: String,
+    pub kind: String, // "Precompile", "NamespaceRegistry", etc.
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SlotSchemaConfig {
+    pub slot_id: u16,
+    pub name: String,
+    pub plugin_name: String,
+    pub version: u32,
+    pub activation_epoch: u64,
+}
 
 /// Static configurations loaded at startup.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -10,9 +136,12 @@ pub struct StaticConfig {
     /// Data Availability Sampling parameters.
     pub das: DasConfig,
     /// Snowman consensus parameters.
-    pub snowman: SnowmanConfig,
+    pub snowman: GlobalConsensusConfig,
     /// Merit progressive distribution parameters.
     pub merit: MeritTierConfig,
+    /// Shard consensus parameters.
+    #[serde(default)]
+    pub shard: ShardConfig,
 }
 
 impl Default for StaticConfig {
@@ -21,8 +150,9 @@ impl Default for StaticConfig {
             pagerank: PageRankConfig::default(),
             epoch: EpochConfig::default(),
             das: DasConfig::default(),
-            snowman: SnowmanConfig::default(),
+            snowman: GlobalConsensusConfig::default(),
             merit: MeritTierConfig::default(),
+            shard: ShardConfig::default(),
         }
     }
 }
@@ -51,23 +181,35 @@ impl Default for PageRankConfig {
     }
 }
 
-/// Epoch static timings.
+/// Epoch configuration.
+///
+/// # The epoch IS the clock
+///
+/// Epoch boundaries are defined by a `ThresholdEpochMarker` completing its BFT frontier cut
+/// across the sub-committee — not by block count, not by wall-clock time.
+/// The duration of an epoch is emergent: it depends on network latency, quorum collection
+/// time, and marker propagation. You cannot know ahead of time how long an epoch takes.
+///
+/// All time-sensitive protocol parameters (publishing windows, distribution intervals,
+/// committee rotation) are expressed exclusively in **epoch heights**.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EpochConfig {
-    /// Length of an epoch in blocks (e.g., 1_296_000).
-    pub epoch_length: u64,
-    /// Publishing window length in blocks (e.g., 300).
-    pub publishing_window: u64,
-    /// Target block time in milliseconds (e.g. 2000 for 2s).
-    pub block_time_ms: u64,
+    /// Minimum number of Multi-Paxos log slots a sub-committee must complete before any
+    /// member may propose co-signing the next `ThresholdEpochMarker`.
+    /// This is the liveness lower bound: an epoch cannot close with zero progress.
+    /// Default: 1 (at least one Paxos slot must commit before marker is eligible).
+    pub min_paxos_slots: u64,
+    /// Number of epoch heights that form the publishing window after an epoch closes.
+    /// Validators must submit KZG DA commitments and PageRank Merkle roots within this window.
+    /// Default: 1 (next epoch height is the deadline; missing = slash).
+    pub publishing_window_epochs: u64,
 }
 
 impl Default for EpochConfig {
     fn default() -> Self {
         Self {
-            epoch_length: 1_296_000,
-            publishing_window: 300,
-            block_time_ms: 2000,
+            min_paxos_slots: 1,
+            publishing_window_epochs: 1,
         }
     }
 }
@@ -124,7 +266,7 @@ pub struct DynamicConfig {
     pub parallel_execution_engine: String,
     /// Dynamic, consensus-driven registry of CAIP-2 namespaces mapped to Signature and Hash schemes.
     #[serde(default = "default_caip_registry")]
-    pub caip_registry: std::collections::HashMap<String, (crate::crypto::SignatureScheme, crate::crypto::HashScheme)>,
+    pub caip_registry: std::collections::HashMap<String, (sovereign_crypto::SignatureScheme, sovereign_crypto::HashScheme)>,
 }
 
 fn default_parallel_engine() -> String {
@@ -135,14 +277,14 @@ fn default_pq_scheme() -> String {
     "mldsa".to_string()
 }
 
-fn default_caip_registry() -> std::collections::HashMap<String, (crate::crypto::SignatureScheme, crate::crypto::HashScheme)> {
+fn default_caip_registry() -> std::collections::HashMap<String, (sovereign_crypto::SignatureScheme, sovereign_crypto::HashScheme)> {
     let mut map = std::collections::HashMap::new();
-    map.insert("eip155".to_string(), (crate::crypto::SignatureScheme::Secp256k1, crate::crypto::HashScheme::Keccak256));
-    map.insert("solana".to_string(), (crate::crypto::SignatureScheme::Ed25519, crate::crypto::HashScheme::Blake3));
-    map.insert("cosmos".to_string(), (crate::crypto::SignatureScheme::Secp256k1, crate::crypto::HashScheme::Sha256));
-    map.insert("bip122".to_string(), (crate::crypto::SignatureScheme::Secp256k1, crate::crypto::HashScheme::Sha256));
-    map.insert("polkadot".to_string(), (crate::crypto::SignatureScheme::Ed25519, crate::crypto::HashScheme::Blake3));
-    map.insert("tezos".to_string(), (crate::crypto::SignatureScheme::Secp256r1, crate::crypto::HashScheme::Keccak256));
+    map.insert("eip155".to_string(), (sovereign_crypto::SignatureScheme::Secp256k1, sovereign_crypto::HashScheme::Keccak256));
+    map.insert("solana".to_string(), (sovereign_crypto::SignatureScheme::Ed25519, sovereign_crypto::HashScheme::Blake3));
+    map.insert("cosmos".to_string(), (sovereign_crypto::SignatureScheme::Secp256k1, sovereign_crypto::HashScheme::Sha256));
+    map.insert("bip122".to_string(), (sovereign_crypto::SignatureScheme::Secp256k1, sovereign_crypto::HashScheme::Sha256));
+    map.insert("polkadot".to_string(), (sovereign_crypto::SignatureScheme::Ed25519, sovereign_crypto::HashScheme::Blake3));
+    map.insert("tezos".to_string(), (sovereign_crypto::SignatureScheme::Secp256r1, sovereign_crypto::HashScheme::Keccak256));
     map
 }
 
@@ -166,9 +308,9 @@ impl Default for DynamicConfig {
     }
 }
 
-/// Snowman consensus parameters.
+/// Global Snowman BFT consensus parameters.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SnowmanConfig {
+pub struct GlobalConsensusConfig {
     /// Sample size k
     pub k: usize,
     /// Quorum fraction alpha
@@ -177,12 +319,39 @@ pub struct SnowmanConfig {
     pub beta: u32,
 }
 
-impl Default for SnowmanConfig {
+/// Backward compatibility alias
+pub type SnowmanConfig = GlobalConsensusConfig;
+
+impl Default for GlobalConsensusConfig {
     fn default() -> Self {
         Self {
             k: 10,
             alpha: 0.8,
             beta: 15,
+        }
+    }
+}
+
+/// Dynamic Shard consensus and superposition parameters.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShardConfig {
+    /// Base shard count at optimal velocity.
+    pub base_shards: u32,
+    /// Minimum shard count (floor).
+    pub min_shards: u32,
+    /// Maximum shard count (ceiling).
+    pub max_shards: u32,
+    /// Timeout in epochs for floating blocks before auto-reclaim.
+    pub superposition_timeout_epochs: u64,
+}
+
+impl Default for ShardConfig {
+    fn default() -> Self {
+        Self {
+            base_shards: 16,
+            min_shards: 16,
+            max_shards: 4096,
+            superposition_timeout_epochs: 10,
         }
     }
 }
